@@ -27,12 +27,14 @@ def rotate_stepper(steps, delay, is_clockwise=True):
     set_driver_enable(True)
     time.sleep(0.01)
 
+    # DIR 핀 제어
     if is_clockwise:
         dir_pin.on()
     else:
         dir_pin.off()
 
-    time.sleep(0.01)
+    # DIR 신호가 드라이버 내부 포토커플러에 확실히 전달되도록 대기 시간 증가
+    time.sleep(0.02)
 
     for _ in range(steps):
         step_pin.on()
@@ -43,35 +45,43 @@ def rotate_stepper(steps, delay, is_clockwise=True):
     set_driver_enable(False)
 
 
-def rotate_by_angle(angle, delay=0.002, is_clockwise=True, steps_per_rev=400):
-    """각도 기반 회전 제어 함수
+def rotate_by_angle_step_by_step(
+    angle, delay=0.002, is_clockwise=True, steps_per_rev=400
+):
+    """1스텝씩 반복하여 원하는 각도까지 회전시키는 함수"""
+    total_steps = round((angle / 360.0) * steps_per_rev)
 
-    :param steps_per_rev: TB6600 1/2 마이크로스텝(SW1=OFF, SW2/3=ON) 기준 400
-    """
-    # int() 대신 round()를 사용하여 반올림 처리 (부동소수점 오차 방지)
-    steps = round((angle / 360.0) * steps_per_rev)
-
-    if steps < 1:
-        print("경고: 입력한 각도가 너무 작아 1스텝 미만입니다.")
+    if total_steps < 1:
+        print("경고: 입력한 각도가 너무 작습니다.")
         return
 
-    rotate_stepper(steps=steps, delay=delay, is_clockwise=is_clockwise)
+    print(f"-> 총 {total_steps}스텝을 1스텝씩 나누어 인가합니다.")
+
+    # 1스텝(1.8도 또는 마이크로스텝 단위)씩 total_steps 번 반복 실행
+    for i in range(total_steps):
+        rotate_stepper(steps=1, delay=delay, is_clockwise=is_clockwise)
+        time.sleep(0.001)  # 스텝 간 미세 간격
+
 
 if __name__ == "__main__":
     try:
-        print("=== 스텝 모터 3.6도 제어 테스트 시작 ===")
+        print("=== 스텝 모터 3.6도 (1스텝 반복) 제어 테스트 시작 ===")
 
-        # 1. 정방향 3.6도 회전
-        print("1. 정방향 3.6도 회전")
-        rotate_by_angle(angle=3.6, delay=0.002, is_clockwise=True)
+        # 1. 정방향 3.6도 회전 (400스텝/회전 기준 4스텝)
+        print("\n1. 정방향(CW) 3.6도 회전")
+        rotate_by_angle_step_by_step(
+            angle=3.6, delay=0.002, is_clockwise=True, steps_per_rev=400
+        )
         time.sleep(1)
 
         # 2. 역방향 3.6도 회전
-        print("2. 역방향 3.6도 회전")
-        rotate_by_angle(angle=3.6, delay=0.002, is_clockwise=False)
+        print("\n2. 역방향(CCW) 3.6도 회전")
+        rotate_by_angle_step_by_step(
+            angle=3.6, delay=0.002, is_clockwise=False, steps_per_rev=400
+        )
         time.sleep(1)
 
-        print("테스트 정상 완료!")
+        print("\n테스트 정상 완료!")
 
     except KeyboardInterrupt:
         print("\n사용자에 의해 중단됨")
