@@ -1,93 +1,75 @@
 import time
 from gpiozero import OutputDevice
 
-# ==========================================
-# 핀 설정
-# ==========================================
-ENA_PIN = 26  # Enable 핀
-DIR_PIN = 20  # Direction 핀
-STEP_PIN = 21  # Step 핀
+# GPIO 핀 설정 (BCM 번호)
+DIR_PIN = 20
+PUL_PIN = 21
 
-# GPIO 출력 개체 생성
-ena_pin = OutputDevice(ENA_PIN)
-dir_pin = OutputDevice(DIR_PIN)
-step_pin = OutputDevice(STEP_PIN)
+# gpiozero OutputDevice 객체 생성
+dir_output = OutputDevice(DIR_PIN)
+pul_output = OutputDevice(PUL_PIN)
 
-
-def set_driver_enable(enable=True):
-    """드라이버 활성화/비활성화 함수"""
-    if enable:
-        ena_pin.off()  # LOW -> Active
+def step_motor(steps, delay, direction):
+    """
+    모터 스텝 제어 함수
+    :param steps: 이동할 스텝 수
+    :param delay: 스텝 간 딜레이 (초 단위, 속도 조절)
+    :param direction: True(정방향), False(역방향)
+    """
+    # 1. 방향 설정
+    if direction:
+        dir_output.on()   # 정방향 (HIGH)
     else:
-        ena_pin.on()  # HIGH -> Disable
+        dir_output.off()  # 역방향 (LOW)
+    
+    time.sleep(0.005)  # 방향 신호가 안정화되도록 딜레이
 
-
-def rotate_stepper(steps, delay, is_clockwise=True):
-    """스텝 수 기반 회전 제어 함수"""
-    set_driver_enable(True)
-    time.sleep(0.01)
-
-    # DIR 핀 제어
-    if is_clockwise:
-        dir_pin.on()
-    else:
-        dir_pin.off()
-
-    # DIR 신호가 드라이버 내부 포토커플러에 확실히 전달되도록 대기 시간 증가
-    time.sleep(0.02)
-
+    # 2. 펄스(Step) 신호 발생
     for _ in range(steps):
-        step_pin.on()
+        pul_output.on()
         time.sleep(delay)
-        step_pin.off()
+        pul_output.off()
         time.sleep(delay)
 
-    set_driver_enable(False)
-
-
-def rotate_by_angle_step_by_step(
-    angle, delay=0.002, is_clockwise=True, steps_per_rev=400
-):
-    """1스텝씩 반복하여 원하는 각도까지 회전시키는 함수"""
-    total_steps = round((angle / 360.0) * steps_per_rev)
-
-    if total_steps < 1:
-        print("경고: 입력한 각도가 너무 작습니다.")
-        return
-
-    print(f"-> 총 {total_steps}스텝을 1스텝씩 나누어 인가합니다.")
-
-    # 1스텝(1.8도 또는 마이크로스텝 단위)씩 total_steps 번 반복 실행
-    for i in range(total_steps):
-        rotate_stepper(steps=1, delay=delay, is_clockwise=is_clockwise)
-        time.sleep(0.001)  # 스텝 간 미세 간격
-
-
-if __name__ == "__main__":
+def main():
     try:
-        print("=== 스텝 모터 3.6도 (1스텝 반복) 제어 테스트 시작 ===")
+        print("--- Nema 17 모터 gpiozero 테스트 시작 ---")
 
-        # 1. 정방향 3.6도 회전 (400스텝/회전 기준 4스텝)
-        print("\n1. 정방향(CW) 3.6도 회전")
-        rotate_by_angle_step_by_step(
-            angle=3.6, delay=0.002, is_clockwise=True, steps_per_rev=400
-        )
+        steps_per_rev = 200  # 1회전 기본 200스텝 (1.8도 기준)
+        microsteps = 4       # TB6600 DIP 스위치 설정값 (예: 1/4 마이크로스텝)
+        total_steps = steps_per_rev * microsteps  # 1회전당 필요 펄스 수 (800스텝)
+
+        delay_speed = 0.0005  # 속도 조절 (작을수록 빠름, 추천 range: 0.0002 ~ 0.002)
+
+        # 1. 정방향 테스트
+        print("1. 정방향(CW) 1회전...")
+        step_motor(steps=total_steps, delay=delay_speed, direction=True)
         time.sleep(1)
 
-        # 2. 역방향 3.6도 회전
-        print("\n2. 역방향(CCW) 3.6도 회전")
-        rotate_by_angle_step_by_step(
-            angle=3.6, delay=0.002, is_clockwise=False, steps_per_rev=400
-        )
+        # 2. 역방향 테스트
+        print("2. 역방향(CCW) 1회전...")
+        step_motor(steps=total_steps, delay=delay_speed, direction=False)
         time.sleep(1)
 
-        print("\n테스트 정상 완료!")
+        # 3. 왕복 테스트 (3회)
+        print("3. 왕복 테스트 (3회)...")
+        for i in range(3):
+            print(f"   [{i+1}/3] 정방향")
+            step_motor(steps=total_steps, delay=delay_speed, direction=True)
+            time.sleep(0.5)
+
+            print(f"   [{i+1}/3] 역방향")
+            step_motor(steps=total_steps, delay=delay_speed, direction=False)
+            time.sleep(0.5)
+
+        print("--- 테스트 완료 ---")
 
     except KeyboardInterrupt:
-        print("\n사용자에 의해 중단됨")
-
+        print("\n사용자에 의해 프로그램이 중단되었습니다.")
     finally:
-        set_driver_enable(False)
-        ena_pin.close()
-        dir_pin.close()
-        step_pin.close()
+        # 종료 시 핀 상태 초기화
+        dir_output.off()
+        pul_output.off()
+
+if __name__ == "__main__":
+    main()
