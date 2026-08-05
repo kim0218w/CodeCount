@@ -43,16 +43,19 @@ def rotate_stepper(steps, delay, is_clockwise=True):
     set_driver_enable(False)
 
 
-def rotate_by_angle(angle, delay=0.002, is_clockwise=True, steps_per_rev=200):
-    """각도 기반 회전 제어 함수"""
-    steps = int((angle / 360.0) * steps_per_rev)
+def rotate_by_angle(angle, delay=0.002, is_clockwise=True, steps_per_rev=400):
+    """각도 기반 회전 제어 함수
+
+    :param steps_per_rev: TB6600 1/2 마이크로스텝(SW1=OFF, SW2/3=ON) 기준 400
+    """
+    # int() 대신 round()를 사용하여 반올림 처리 (부동소수점 오차 방지)
+    steps = round((angle / 360.0) * steps_per_rev)
 
     if steps < 1:
-        print("경고: 입력한 각도가 너무 작습니다.")
+        print("경고: 입력한 각도가 너무 작아 1스텝 미만입니다.")
         return
 
     rotate_stepper(steps=steps, delay=delay, is_clockwise=is_clockwise)
-
 
 if __name__ == "__main__":
     try:
