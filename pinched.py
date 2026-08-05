@@ -97,14 +97,14 @@ def main():
         print("3. 왕복 연속 테스트 (3회)...")
         enable_motor()
 
-        for i in range(3):
+        for i in range(6):
             print(f"   [{i+1}/3] 정방향")
             step_motor_precise(total_steps, pulse_delay, True)
-            time.sleep(1)  # 모터 관성 및 신호 버퍼 정리를 위한 대기
+            time.sleep(2)  # 모터 관성 및 신호 버퍼 정리를 위한 대기
 
             print(f"   [{i+1}/3] 역방향")
             step_motor_precise(total_steps, pulse_delay, False)
-            time.sleep(1)
+            time.sleep(2)
 
         disable_motor()
         print("--- 테스트 완료 ---")
