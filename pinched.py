@@ -14,46 +14,47 @@ pul_output = OutputDevice(PUL_PIN)
 def enable_motor():
     """모터 활성화 (전류 공급, 고정/회전 가능)"""
     ena_output.off()  # TB6600은 LOW일 때 Enable
-    time.sleep(0.01)  # 드라이버 대기 시간
+    time.sleep(0.02)  # 드라이버 안정화 대기 시간 (증대)
 
 def disable_motor():
-    """모터 비활성화 (전류 차단, 전력 절약, 모터 헐거워짐)"""
+    """모터 비활성화 (전류 차단, 전력 절약)"""
     ena_output.on()   # TB6600은 HIGH일 때 Disable
     time.sleep(0.01)
 
 def step_motor(steps, delay, direction):
     """
-    모터 스텝 제어 함수
+    모터 스텝 제어 함수 (안정화 지연 시간 포함)
     :param steps: 이동할 스텝 수
     :param delay: 스텝 간 딜레이 (초 단위)
     :param direction: True(정방향), False(역방향)
     """
-    # 1. 모터 전원 공급 (Enable)
+    # 1. 모터 활성화
     enable_motor()
+    time.sleep(0.02)  # ENA 켜지고 드라이버 안정화 대기
 
     # 2. 방향 설정
     if direction:
         dir_output.on()   # 정방향 (HIGH)
     else:
         dir_output.off()  # 역방향 (LOW)
-    
-    time.sleep(0.005)  # 방향 신호 안정화
+    time.sleep(0.02)  # DIR 신호 래치(Latch) 대기 시간 확보
 
-    # 3. 펄스(Step) 신호 발생
+    # 3. 펄스 공급
     for _ in range(steps):
         pul_output.on()
         time.sleep(delay)
         pul_output.off()
         time.sleep(delay)
 
-    # 4. 회전 완료 후 즉시 전원 차단 (전력 절약)
+    # 4. 회전 완료 후 비활성화
+    time.sleep(0.01)  # 마지막 스텝 완료 후 대기
     disable_motor()
 
 def main():
     try:
-        print("--- Nema 17 ENA 제어 모드 테스트 시작 ---")
+        print("--- Nema 17 지연시간 보완 테스트 시작 ---")
         
-        # 시작 시 모터 전원 차단 상태 유지
+        # 시작 시 초기화
         disable_motor()
 
         steps_per_rev = 200  # 1회전 기본 스텝
@@ -62,35 +63,33 @@ def main():
 
         delay_speed = 0.0005  # 회전 속도
 
-        # 1. 정방향 1회전 (회전 후 전원 차단됨)
-        print("1. 정방향(CW) 1회전 (회전 후 전력 차단)...")
+        # 1. 정방향 1회전
+        print("1. 정방향(CW) 1회전...")
         step_motor(steps=total_steps, delay=delay_speed, direction=True)
-        print("   -> 대기 중: ENA 차단됨 (전력 0, 손으로 모터 축 회전 가능)")
-        time.sleep(2)
+        time.sleep(1)
 
-        # 2. 역방향 1회전 (회전 후 전원 차단됨)
-        print("2. 역방향(CCW) 1회전 (회전 후 전력 차단)...")
+        # 2. 역방향 1회전
+        print("2. 역방향(CCW) 1회전...")
         step_motor(steps=total_steps, delay=delay_speed, direction=False)
-        print("   -> 대기 중: ENA 차단됨")
-        time.sleep(2)
+        time.sleep(1)
 
-        # 3. 연속 왕복 동작 테스트
+        # 3. 왕복 연속 동작 테스트 (3회)
         print("3. 왕복 연속 동작 테스트 (3회)...")
         for i in range(3):
             print(f"   [{i+1}/3] 정방향")
             step_motor(steps=total_steps, delay=delay_speed, direction=True)
-            time.sleep(1)  # 대기 시간 동안 전력 절약 상태 유지
+            time.sleep(0.5)
 
             print(f"   [{i+1}/3] 역방향")
             step_motor(steps=total_steps, delay=delay_speed, direction=False)
-            time.sleep(1)
+            time.sleep(0.5)
 
         print("--- 테스트 완료 ---")
 
     except KeyboardInterrupt:
         print("\n사용자에 의해 프로그램이 중단되었습니다.")
     finally:
-        # 종료 시 모터 전원 차단 및 핀 정리
+        # 종료 시 안전하게 핀 상태 정리
         disable_motor()
         dir_output.off()
         pul_output.off()
