@@ -4,7 +4,7 @@ from gpiozero import OutputDevice
 # ==========================================
 # 핀 설정 (본인의 실제 GPIO 핀 번호로 변경)
 # ==========================================
-ENA_PIN = 17   # Enable 핀 (활성화/비활성화)
+ENA_PIN = 26  # Enable 핀 (활성화/비활성화)
 DIR_PIN = 20   # Direction 핀 (방향 제어)
 STEP_PIN = 21  # Step 핀 (펄스 출력)
 
