@@ -14,17 +14,17 @@ pul_output = OutputDevice(PUL_PIN)
 def enable_motor():
     """모터 활성화 (전류 공급)"""
     ena_output.off()  # TB6600 LOW = Enable
-    time.sleep(0.05)  # 드라이버 회로 및 포토커플러 완전 충전 대기
+    time.sleep(1)  # 드라이버 회로 및 포토커플러 완전 충전 대기
 
 def disable_motor():
     """모터 비활성화 (전력 절약)"""
-    time.sleep(0.05)  # 잔여 펄스 완전 소진 대기
+    time.sleep(1)  # 잔여 펄스 완전 소진 대기
     ena_output.on()   # TB6600 HIGH = Disable
 
 def clear_buffer():
     """버퍼 및 잔여 신호 강제 비우기 (Flush)"""
     pul_output.off()
-    time.sleep(0.05)  # 잔여 신호 강제 드롭 및 대기
+    time.sleep(1)  # 잔여 신호 강제 드롭 및 대기
 
 def step_motor_precise(steps, step_delay, direction):
     """
@@ -42,7 +42,7 @@ def step_motor_precise(steps, step_delay, direction):
         dir_output.off()  # 역방향 (LOW)
     
     # DIR 방향 신호가 내부 포토커플러에 완전 고정(Latch)될 때까지 대기
-    time.sleep(0.05) 
+    time.sleep(1) 
 
     # 2. 정확한 동기식 펄스 생성 (버퍼링 방지)
     # perf_counter를 사용하여 시스템 버퍼 지연에 의한 펄스 뭉침 현상 방지
@@ -74,7 +74,7 @@ def main():
         total_steps = steps_per_rev * microsteps  # 800스텝
 
         # 펄스 속도 (너무 빠르면 CPU 점유율이 올라가므로 0.0008~0.001 권장)
-        pulse_delay = 0.0008 
+        pulse_delay = 0.001
 
         # ==========================================
         # 1. 정방향 / 역방향 단발 테스트
@@ -83,13 +83,13 @@ def main():
         enable_motor()
         step_motor_precise(total_steps, pulse_delay, True)
         disable_motor()
-        time.sleep(1)
+        time.sleep(1.5)
 
         print("2. 역방향(CCW) 회전...")
         enable_motor()
         step_motor_precise(total_steps, pulse_delay, False)
         disable_motor()
-        time.sleep(1)
+        time.sleep(1.5)
 
         # ==========================================
         # 2. 왕복 연속 동작 (쌓임 방지 검증)
@@ -100,11 +100,11 @@ def main():
         for i in range(3):
             print(f"   [{i+1}/3] 정방향")
             step_motor_precise(total_steps, pulse_delay, True)
-            time.sleep(0.3)  # 모터 관성 및 신호 버퍼 정리를 위한 대기
+            time.sleep(1)  # 모터 관성 및 신호 버퍼 정리를 위한 대기
 
             print(f"   [{i+1}/3] 역방향")
             step_motor_precise(total_steps, pulse_delay, False)
-            time.sleep(0.3)
+            time.sleep(1)
 
         disable_motor()
         print("--- 테스트 완료 ---")
