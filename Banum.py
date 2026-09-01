@@ -4,25 +4,24 @@ import numpy as np
 import time
 
 
-# ==========================================
-# 설정값
-# ==========================================
-
-REAL_WIDTH = 3.5
-REAL_HEIGHT = 3.5
-
-REFERENCE_DISTANCE = 15.5
+# ==================================================
+# 설정
+# ==================================================
 
 MIN_AREA = 300
 
+# 측정할 실제 거리
+DISTANCES = [13.5, 11.5, 9.5, 7.5, 5.5, 3.5]
 
-# ==========================================
-# 카메라 생성
-# ==========================================
+current_index = 0
+
+
+# ==================================================
+# 카메라 설정
+# ==================================================
 
 cam0 = Picamera2(0)
 cam1 = Picamera2(1)
-
 
 config0 = cam0.create_preview_configuration(
     main={
@@ -47,10 +46,9 @@ cam1.start()
 time.sleep(2)
 
 
-# ==========================================
-# 기준 물체 색상 등록
-# Camera 0에서 노란색 내부 선택
-# ==========================================
+# ==================================================
+# 노란색 타겟 색상 등록
+# ==================================================
 
 frame0 = cam0.capture_array()
 
@@ -60,15 +58,12 @@ frame0 = cv2.cvtColor(
 )
 
 print()
-print("======================================")
-print("기준 물체 색상 등록")
-print("======================================")
-print(f"물체 크기 : {REAL_WIDTH} x {REAL_HEIGHT} cm")
-print(f"기준 거리 : {REFERENCE_DISTANCE} cm")
+print("==========================================")
+print("  Stereo Disparity Measurement")
+print("==========================================")
 print()
-print("물체를 정확히 15.5 cm에 놓으세요.")
-print("노란색 내부 영역만 마우스로 선택하세요.")
-print("검은색 테두리는 제외하는 것이 좋습니다.")
+print("노란색 물체 내부를 마우스로 선택하세요.")
+print("검은 테두리는 제외하세요.")
 print("선택 후 ENTER 또는 SPACE")
 print()
 
@@ -96,14 +91,11 @@ if w == 0 or h == 0:
     exit()
 
 
-# ==========================================
-# 선택 영역 HSV 분석
-# ==========================================
+# ==================================================
+# HSV 색상 계산
+# ==================================================
 
-selected = frame0[
-    y:y+h,
-    x:x+w
-]
+selected = frame0[y:y+h, x:x+w]
 
 hsv_selected = cv2.cvtColor(
     selected,
@@ -123,17 +115,6 @@ v_mean = int(
     np.median(hsv_selected[:, :, 2])
 )
 
-
-print()
-print("선택 색상 HSV")
-print("H =", h_mean)
-print("S =", s_mean)
-print("V =", v_mean)
-
-
-# ==========================================
-# HSV 허용 범위
-# ==========================================
 
 H_MARGIN = 15
 S_MARGIN = 90
@@ -160,9 +141,9 @@ kernel = np.ones(
 )
 
 
-# ==========================================
-# 타겟 검출 함수
-# ==========================================
+# ==================================================
+# 물체 검출 함수
+# ==================================================
 
 def detect_target(frame):
 
@@ -178,14 +159,13 @@ def detect_target(frame):
     )
 
 
-    # 작은 잡음 제거
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_OPEN,
         kernel
     )
 
-    # 영역 내부 작은 구멍 연결
+
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_CLOSE,
@@ -207,7 +187,7 @@ def detect_target(frame):
 
 
     if not valid:
-        return None, mask
+        return None
 
 
     target = max(
@@ -223,96 +203,31 @@ def detect_target(frame):
     cy = y + h / 2.0
 
 
-    return (
-        x,
-        y,
-        w,
-        h,
-        cx,
-        cy
-    ), mask
+    return x, y, w, h, cx, cy
 
 
-# ==========================================
-# 15.5 cm 기준 disparity 측정
-# ==========================================
+# ==================================================
+# 사용법 출력
+# ==================================================
 
 print()
-print("======================================")
-print("15.5 cm 기준값 측정")
-print("======================================")
-print("물체를 움직이지 마세요.")
-
-
-reference_disparities = []
-
-
-for _ in range(30):
-
-    frame0 = cam0.capture_array()
-    frame1 = cam1.capture_array()
-
-
-    frame0 = cv2.cvtColor(
-        frame0,
-        cv2.COLOR_RGB2BGR
-    )
-
-    frame1 = cv2.cvtColor(
-        frame1,
-        cv2.COLOR_RGB2BGR
-    )
-
-
-    result0, _ = detect_target(frame0)
-    result1, _ = detect_target(frame1)
-
-
-    if result0 is not None and result1 is not None:
-
-        cx0 = result0[4]
-        cx1 = result1[4]
-
-        disparity = abs(
-            cx0 - cx1
-        )
-
-        reference_disparities.append(
-            disparity
-        )
-
-
-if len(reference_disparities) == 0:
-
-    print("두 카메라에서 물체를 동시에 찾지 못했습니다.")
-
-    cam0.stop()
-    cam1.stop()
-
-    exit()
-
-
-REFERENCE_DISPARITY = float(
-    np.median(reference_disparities)
-)
-
-
+print("==========================================")
+print("측정 시작")
+print("==========================================")
 print()
-print("기준 거리 :", REFERENCE_DISTANCE, "cm")
-print(
-    "기준 disparity :",
-    round(REFERENCE_DISPARITY, 2),
-    "px"
-)
+
+print("물체를 13.5 cm에 놓으세요.")
 print()
-print("이제 물체를 앞뒤로 움직여보세요.")
-print("종료 : q")
+
+print("s : 현재 값 기록")
+print("q : 프로그램 종료")
+
 print()
 
 
-# ==========================================
-# 실시간 처리
-# ==========================================
+# ==================================================
+# 실시간 측정
+# ==================================================
 
 while True:
 
@@ -331,9 +246,18 @@ while True:
     )
 
 
-    result0, mask0 = detect_target(frame0)
-    result1, mask1 = detect_target(frame1)
+    result0 = detect_target(frame0)
+    result1 = detect_target(frame1)
 
+
+    cx0 = None
+    cx1 = None
+    disparity = None
+
+
+    # --------------------------------------------------
+    # Camera 0
+    # --------------------------------------------------
 
     if result0 is not None:
 
@@ -358,6 +282,10 @@ while True:
         )
 
 
+    # --------------------------------------------------
+    # Camera 1
+    # --------------------------------------------------
+
     if result1 is not None:
 
         x1, y1, w1, h1, cx1, cy1 = result1
@@ -381,16 +309,14 @@ while True:
         )
 
 
-    # 두 카메라 모두 검출 성공
-    if (
-        result0 is not None
-        and
-        result1 is not None
-    ):
+    # --------------------------------------------------
+    # Signed disparity
+    # --------------------------------------------------
 
-        disparity = abs(
-            cx0 - cx1
-        )
+    if cx0 is not None and cx1 is not None:
+
+        # abs() 사용하지 않음!
+        disparity = cx0 - cx1
 
 
         cv2.putText(
@@ -417,7 +343,7 @@ while True:
 
         cv2.putText(
             frame0,
-            f"Disparity: {disparity:.1f}px",
+            f"D: {disparity:.1f}px",
             (20, 75),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -428,7 +354,7 @@ while True:
 
         cv2.putText(
             frame1,
-            f"Disparity: {disparity:.1f}px",
+            f"D: {disparity:.1f}px",
             (20, 75),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -437,31 +363,29 @@ while True:
         )
 
 
+    # --------------------------------------------------
+    # 현재 측정해야 할 거리 표시
+    # --------------------------------------------------
+
+    if current_index < len(DISTANCES):
+
+        current_distance = DISTANCES[current_index]
+
         cv2.putText(
             frame0,
-            f"Ref 15.5cm: {REFERENCE_DISPARITY:.1f}px",
+            f"Set target: {current_distance:.1f} cm",
             (20, 110),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.65,
             (255, 255, 255),
             2
         )
 
 
-    else:
+    # --------------------------------------------------
+    # 화면 합치기
+    # --------------------------------------------------
 
-        cv2.putText(
-            frame0,
-            "Target Not Found",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 255),
-            2
-        )
-
-
-    # 두 화면 합치기
     stereo_view = cv2.hconcat([
         frame0,
         frame1
@@ -474,20 +398,60 @@ while True:
     )
 
 
-    cv2.imshow(
-        "Mask Camera 0",
-        mask0
-    )
-
-
-    cv2.imshow(
-        "Mask Camera 1",
-        mask1
-    )
-
-
     key = cv2.waitKey(1) & 0xFF
 
+
+    # ==================================================
+    # S키 → 현재값 출력
+    # ==================================================
+
+    if key == ord("s"):
+
+        if current_index >= len(DISTANCES):
+
+            print()
+            print("모든 거리 측정이 끝났습니다.")
+
+        elif disparity is None:
+
+            print()
+            print("!!! 두 카메라에서 물체가 검출되지 않았습니다.")
+
+        else:
+
+            distance = DISTANCES[current_index]
+
+            print()
+            print("------------------------------------------")
+            print(f"거리       : {distance:.1f} cm")
+            print(f"Camera 0 X : {cx0:.1f} px")
+            print(f"Camera 1 X : {cx1:.1f} px")
+            print(f"Disparity  : {disparity:.1f} px")
+            print("------------------------------------------")
+
+
+            current_index += 1
+
+
+            if current_index < len(DISTANCES):
+
+                print()
+                print(
+                    f"다음: 물체를 "
+                    f"{DISTANCES[current_index]:.1f} cm에 놓으세요."
+                )
+
+            else:
+
+                print()
+                print("==========================================")
+                print("모든 측정 완료!")
+                print("==========================================")
+
+
+    # ==================================================
+    # Q키 → 종료
+    # ==================================================
 
     if key == ord("q"):
         break
