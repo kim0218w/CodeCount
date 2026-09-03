@@ -1,587 +1,660 @@
-from picamera2 import Picamera2
-import cv2
-import numpy as np
+from gpiozero import OutputDevice
 import time
-import os
+import math
 
 
-# ==================================================
-# 설정
-# ==================================================
+# ============================================================
+# 1. GPIO 핀 설정 (BCM GPIO 번호)
+# ============================================================
 
-# 체커보드 내부 코너 개수
-CHECKERBOARD = (7, 6)
+AXIS_PINS = {
 
-# 체커보드 한 칸 실제 크기(cm)
-# 반드시 실제 화면에서 자로 재서 수정!
-SQUARE_SIZE = 2.0
+    "X": {
+        "EN": 16,
+        "DIR": 19,
+        "PUL": 20
+    },
 
-# 저장할 최소 이미지 수
-MIN_IMAGES = 10
+    "Y": {
+        "EN": 22,
+        "DIR": 23,
+        "PUL": 24
+    },
 
-SAVE_DIR = "stereo_calibration"
+    "Z": {
+        "EN": 5,
+        "DIR": 6,
+        "PUL": 13
+    },
 
-os.makedirs(SAVE_DIR, exist_ok=True)
-
-
-# ==================================================
-# 카메라 시작
-# ==================================================
-
-cam0 = Picamera2(0)
-cam1 = Picamera2(1)
-
-config0 = cam0.create_preview_configuration(
-    main={
-        "size": (640, 480),
-        "format": "RGB888"
+    "R": {      # 로우 축
+        "EN": 18,
+        "DIR": 17,
+        "PUL": 27
     }
-)
+}
 
-config1 = cam1.create_preview_configuration(
-    main={
-        "size": (640, 480),
-        "format": "RGB888"
+
+# ============================================================
+# 2. 모션 설정
+# ============================================================
+
+# 최대 속도 [step/s]
+MAX_STEP_RATE = {
+    "X": 600,
+    "Y": 600,
+    "Z": 400,
+    "R": 400
+}
+
+# 최대 가속도 [step/s²]
+MAX_ACCEL = {
+    "X": 1200,
+    "Y": 1200,
+    "Z": 800,
+    "R": 800
+}
+
+
+# STEP HIGH 유지 시간
+PULSE_WIDTH = 0.0001
+
+
+# 제어 주기
+# 너무 작으면 Raspberry Pi Python에서 CPU 사용량 증가
+CONTROL_DT = 0.001
+
+
+# ============================================================
+# 3. Input Shaping 설정
+# ============================================================
+
+INPUT_SHAPING = True
+
+
+# 각 축의 공진 주파수
+#
+# !!!!! 중요 !!!!!
+# 아래 40Hz는 임시 시험값
+# 실제 장비의 공진주파수를 측정한 후 변경하는 것이 좋음
+#
+RESONANCE_FREQ = {
+    "X": 40.0,
+    "Y": 40.0,
+    "Z": 40.0,
+    "R": 40.0
+}
+
+
+# 감쇠비
+DAMPING_RATIO = {
+    "X": 0.05,
+    "Y": 0.05,
+    "Z": 0.05,
+    "R": 0.05
+}
+
+
+# ============================================================
+# 4. GPIO 객체 생성
+# ============================================================
+
+motors = {}
+
+for axis, pins in AXIS_PINS.items():
+
+    motors[axis] = {
+
+        "EN": OutputDevice(
+            pins["EN"],
+            active_high=True,
+            initial_value=True
+        ),
+
+        "DIR": OutputDevice(
+            pins["DIR"],
+            active_high=True,
+            initial_value=False
+        ),
+
+        "PUL": OutputDevice(
+            pins["PUL"],
+            active_high=True,
+            initial_value=False
+        )
     }
-)
-
-cam0.configure(config0)
-cam1.configure(config1)
-
-cam0.start()
-cam1.start()
-
-time.sleep(2)
 
 
-# ==================================================
-# 체커보드 3D 좌표
-# ==================================================
+# ============================================================
+# 5. 모든 모터 Disable
+# ============================================================
 
-objp = np.zeros(
-    (CHECKERBOARD[0] * CHECKERBOARD[1], 3),
-    np.float32
-)
+def disable_all():
 
-objp[:, :2] = (
-    np.mgrid[
-        0:CHECKERBOARD[0],
-        0:CHECKERBOARD[1]
+    for axis in motors:
+        motors[axis]["EN"].on()
+
+
+# ============================================================
+# 6. S-Curve
+#
+# quintic smoothstep
+#
+# 시작
+# 속도 = 0
+# 가속도 = 0
+#
+# 종료
+# 속도 = 0
+# 가속도 = 0
+#
+# 급격한 가속/감속을 줄여 진동 감소
+# ============================================================
+
+def s_curve_position(t, total_time, total_steps):
+
+    if t <= 0:
+        return 0.0
+
+    if t >= total_time:
+        return float(total_steps)
+
+    s = t / total_time
+
+    # 5차 S-Curve
+    smooth = (
+        10 * s**3
+        - 15 * s**4
+        + 6 * s**5
+    )
+
+    return total_steps * smooth
+
+
+# ============================================================
+# 7. S-Curve 이동시간 계산
+# ============================================================
+
+def calculate_move_time(axis, steps):
+
+    max_speed = MAX_STEP_RATE[axis]
+    max_accel = MAX_ACCEL[axis]
+
+    # --------------------------------------------------------
+    # 속도 제한 기준 시간
+    #
+    # quintic smoothstep의 최대 속도
+    # 약 1.875 * distance / time
+    # --------------------------------------------------------
+
+    time_speed = (
+        1.875 * steps / max_speed
+    )
+
+
+    # --------------------------------------------------------
+    # 가속도 제한 기준 시간
+    #
+    # quintic smoothstep 최대 가속도 계수
+    # 약 5.7735
+    # --------------------------------------------------------
+
+    time_accel = math.sqrt(
+        5.7735 * steps / max_accel
+    )
+
+
+    # 둘 중 큰 값 사용
+    total_time = max(
+        time_speed,
+        time_accel,
+        0.05
+    )
+
+    return total_time
+
+
+# ============================================================
+# 8. ZVD Input Shaper 계산
+# ============================================================
+
+def get_zvd_shaper(axis):
+
+    freq = RESONANCE_FREQ[axis]
+    zeta = DAMPING_RATIO[axis]
+
+    # 잘못된 값 방지
+    zeta = max(0.0, min(zeta, 0.99))
+
+    sqrt_term = math.sqrt(
+        1.0 - zeta * zeta
+    )
+
+    # 감쇠 계수
+    K = math.exp(
+        (-zeta * math.pi) / sqrt_term
+    )
+
+
+    # 공진 반주기
+    Td = 1.0 / (
+        2.0
+        * freq
+        * sqrt_term
+    )
+
+
+    # ZVD Shaper
+    A1 = 1.0 / ((1.0 + K) ** 2)
+
+    A2 = (
+        2.0 * K
+        / ((1.0 + K) ** 2)
+    )
+
+    A3 = (
+        K**2
+        / ((1.0 + K) ** 2)
+    )
+
+
+    return [
+        (0.0, A1),
+        (Td, A2),
+        (2.0 * Td, A3)
     ]
-    .T
-    .reshape(-1, 2)
-)
-
-objp *= SQUARE_SIZE
 
 
-# ==================================================
-# 저장 데이터
-# ==================================================
+# ============================================================
+# 9. Input Shaping이 적용된 위치 계산
+# ============================================================
 
-objpoints = []
+def shaped_position(
+    axis,
+    t,
+    move_time,
+    total_steps
+):
 
-imgpoints0 = []
-imgpoints1 = []
+    # Input Shaping OFF
+    if not INPUT_SHAPING:
 
-saved_count = 0
-
-
-# ==================================================
-# 코너 정밀화 조건
-# ==================================================
-
-criteria = (
-    cv2.TERM_CRITERIA_EPS
-    + cv2.TERM_CRITERIA_MAX_ITER,
-    30,
-    0.001
-)
-
-
-print()
-print("==========================================")
-print("Stereo Calibration Capture")
-print("==========================================")
-print()
-print("체커보드를 두 카메라가 모두 볼 수 있게 하세요.")
-print()
-print("s : 현재 체커보드 위치 저장")
-print("c : calibration 실행")
-print("q : 종료")
-print()
-print(f"최소 {MIN_IMAGES}장 이상 권장")
-print()
-
-
-# ==================================================
-# 촬영 단계
-# ==================================================
-
-while True:
-
-    frame0 = cam0.capture_array()
-    frame1 = cam1.capture_array()
-
-    frame0 = cv2.cvtColor(
-        frame0,
-        cv2.COLOR_RGB2BGR
-    )
-
-    frame1 = cv2.cvtColor(
-        frame1,
-        cv2.COLOR_RGB2BGR
-    )
-
-    gray0 = cv2.cvtColor(
-        frame0,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    gray1 = cv2.cvtColor(
-        frame1,
-        cv2.COLOR_BGR2GRAY
-    )
-
-
-    # --------------------------------------------------
-    # 체커보드 탐색
-    # --------------------------------------------------
-
-    ret0, corners0 = cv2.findChessboardCorners(
-        gray0,
-        CHECKERBOARD,
-        None
-    )
-
-    ret1, corners1 = cv2.findChessboardCorners(
-        gray1,
-        CHECKERBOARD,
-        None
-    )
-
-
-    # --------------------------------------------------
-    # Camera 0 표시
-    # --------------------------------------------------
-
-    if ret0:
-
-        corners0_refined = cv2.cornerSubPix(
-            gray0,
-            corners0,
-            (11, 11),
-            (-1, -1),
-            criteria
+        return s_curve_position(
+            t,
+            move_time,
+            total_steps
         )
 
-        cv2.drawChessboardCorners(
-            frame0,
-            CHECKERBOARD,
-            corners0_refined,
-            ret0
+
+    shaper = get_zvd_shaper(axis)
+
+    position = 0.0
+
+
+    # ZVD convolution
+    for delay, amplitude in shaper:
+
+        position += (
+            amplitude
+            * s_curve_position(
+                t - delay,
+                move_time,
+                total_steps
+            )
         )
 
-        cv2.putText(
-            frame0,
-            "Checkerboard: OK",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2
+
+    return position
+
+
+# ============================================================
+# 10. STEP 펄스
+# ============================================================
+
+def step_pulse(motor):
+
+    motor["PUL"].on()
+
+    time.sleep(PULSE_WIDTH)
+
+    motor["PUL"].off()
+
+
+# ============================================================
+# 11. 모터 이동
+# ============================================================
+
+def move_motor(axis, direction, steps):
+
+    motor = motors[axis]
+
+
+    # --------------------------------------------------------
+    # Enable
+    # LOW = Enable
+    # --------------------------------------------------------
+
+    motor["EN"].off()
+
+
+    # --------------------------------------------------------
+    # 방향
+    # --------------------------------------------------------
+
+    if direction == "H":
+
+        motor["DIR"].on()
+
+    else:
+
+        motor["DIR"].off()
+
+
+    # DIR 안정화
+    time.sleep(0.005)
+
+
+    # --------------------------------------------------------
+    # 이동시간 계산
+    # --------------------------------------------------------
+
+    move_time = calculate_move_time(
+        axis,
+        steps
+    )
+
+
+    # Input Shaper 계산
+    shaper = get_zvd_shaper(axis)
+
+
+    if INPUT_SHAPING:
+
+        final_delay = shaper[-1][0]
+
+    else:
+
+        final_delay = 0
+
+
+    total_time = (
+        move_time
+        + final_delay
+    )
+
+
+    print()
+    print("--------------------------------")
+    print(f"{axis}축 이동")
+    print(f"방향        : {direction}")
+    print(f"스텝        : {steps}")
+    print(f"최대속도    : {MAX_STEP_RATE[axis]} step/s")
+    print(f"최대가속도  : {MAX_ACCEL[axis]} step/s²")
+
+    if INPUT_SHAPING:
+
+        print("S-Curve      : ON")
+        print("Input Shaper : ZVD")
+        print(
+            f"공진주파수   : "
+            f"{RESONANCE_FREQ[axis]} Hz"
         )
 
     else:
 
-        cv2.putText(
-            frame0,
-            "Checkerboard: NOT FOUND",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 255),
-            2
+        print("S-Curve      : ON")
+        print("Input Shaper : OFF")
+
+    print("--------------------------------")
+
+
+    # --------------------------------------------------------
+    # 실제 STEP 수
+    # --------------------------------------------------------
+
+    emitted_steps = 0
+
+
+    start_time = time.perf_counter()
+
+
+    while emitted_steps < steps:
+
+        now = time.perf_counter()
+
+        elapsed = (
+            now
+            - start_time
         )
 
 
-    # --------------------------------------------------
-    # Camera 1 표시
-    # --------------------------------------------------
-
-    if ret1:
-
-        corners1_refined = cv2.cornerSubPix(
-            gray1,
-            corners1,
-            (11, 11),
-            (-1, -1),
-            criteria
-        )
-
-        cv2.drawChessboardCorners(
-            frame1,
-            CHECKERBOARD,
-            corners1_refined,
-            ret1
-        )
-
-        cv2.putText(
-            frame1,
-            "Checkerboard: OK",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2
-        )
-
-    else:
-
-        cv2.putText(
-            frame1,
-            "Checkerboard: NOT FOUND",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 255),
-            2
+        # 현재 목표 위치
+        target_position = shaped_position(
+            axis,
+            elapsed,
+            move_time,
+            steps
         )
 
 
-    # --------------------------------------------------
-    # 저장 개수 표시
-    # --------------------------------------------------
+        # 현재 목표 스텝
+        target_steps = min(
+            int(target_position),
+            steps
+        )
 
-    text = f"Saved: {saved_count}"
 
-    cv2.putText(
-        frame0,
-        text,
-        (20, 75),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2
+        # ----------------------------------------------------
+        # 필요한 STEP 출력
+        # ----------------------------------------------------
+
+        while (
+            emitted_steps < target_steps
+            and emitted_steps < steps
+        ):
+
+            step_pulse(motor)
+
+            emitted_steps += 1
+
+
+        # 이동 완료
+        if (
+            elapsed >= total_time
+            and emitted_steps >= steps
+        ):
+
+            break
+
+
+        time.sleep(CONTROL_DT)
+
+
+    # 혹시 반올림 때문에 남은 STEP이 있으면 보정
+    while emitted_steps < steps:
+
+        step_pulse(motor)
+
+        emitted_steps += 1
+
+
+    print(
+        f">> 이동 완료 : "
+        f"{emitted_steps} STEP"
     )
 
-    cv2.putText(
-        frame1,
-        text,
-        (20, 75),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2
-    )
+    print()
 
 
-    stereo_view = cv2.hconcat([
-        frame0,
-        frame1
-    ])
+# ============================================================
+# 12. 메인
+# ============================================================
 
-    cv2.imshow(
-        "Stereo Calibration",
-        stereo_view
-    )
+disable_all()
 
 
-    key = cv2.waitKey(1) & 0xFF
+print()
+print("========================================")
+print(" Raspberry Pi 5")
+print(" S-Curve + ZVD Input Shaping")
+print("========================================")
+
+print()
+print("입력 형식")
+print()
+print("축 방향 스텝")
+print()
+print("예:")
+print("X L 100")
+print("X H 500")
+print("Y L 1000")
+print("Z H 300")
+print("R L 200")
+print()
+print("종료 : Q")
+print()
+print("========================================")
+print()
 
 
-    # ==================================================
-    # S 키
-    # ==================================================
+try:
 
-    if key == ord("s"):
+    while True:
 
-        if ret0 and ret1:
-
-            objpoints.append(
-                objp.copy()
-            )
-
-            imgpoints0.append(
-                corners0_refined.copy()
-            )
-
-            imgpoints1.append(
-                corners1_refined.copy()
-            )
+        command = input("입력 > ").strip().upper()
 
 
-            filename0 = os.path.join(
-                SAVE_DIR,
-                f"cam0_{saved_count:02d}.jpg"
-            )
+        # ====================================================
+        # 종료
+        # ====================================================
 
-            filename1 = os.path.join(
-                SAVE_DIR,
-                f"cam1_{saved_count:02d}.jpg"
-            )
+        if command == "Q":
+            break
 
 
-            cv2.imwrite(
-                filename0,
-                frame0
-            )
-
-            cv2.imwrite(
-                filename1,
-                frame1
-            )
+        parts = command.split()
 
 
-            saved_count += 1
+        # ====================================================
+        # 입력 형식 검사
+        # ====================================================
 
-            print(
-                f"[{saved_count}] 저장 완료"
-            )
-
-        else:
-
-            print(
-                "두 카메라 모두에서 체커보드가 보여야 저장됩니다."
-            )
-
-
-    # ==================================================
-    # C 키 → calibration
-    # ==================================================
-
-    if key == ord("c"):
-
-        if saved_count < MIN_IMAGES:
+        if len(parts) != 3:
 
             print()
-            print(
-                f"이미지가 부족합니다. "
-                f"현재 {saved_count}장"
-            )
-
-            print(
-                f"최소 {MIN_IMAGES}장 이상 저장하세요."
-            )
+            print("잘못된 입력입니다.")
+            print("예: X L 100")
+            print()
 
             continue
 
 
-        print()
-        print("==========================================")
-        print("Calibration 시작")
-        print("==========================================")
-        print()
+        axis = parts[0]
+
+        direction = parts[1]
 
 
-        image_size = gray0.shape[::-1]
+        # ====================================================
+        # 축 확인
+        # ====================================================
 
+        if axis not in AXIS_PINS:
 
-        # ==================================================
-        # Camera 0 개별 calibration
-        # ==================================================
-
-        ret_cal0, mtx0, dist0, rvecs0, tvecs0 = (
-            cv2.calibrateCamera(
-                objpoints,
-                imgpoints0,
-                image_size,
-                None,
-                None
+            print()
+            print(
+                "축은 X, Y, Z, R 중 "
+                "하나를 입력하세요."
             )
-        )
+
+            print()
+
+            continue
 
 
-        # ==================================================
-        # Camera 1 개별 calibration
-        # ==================================================
+        # ====================================================
+        # 방향 확인
+        # ====================================================
 
-        ret_cal1, mtx1, dist1, rvecs1, tvecs1 = (
-            cv2.calibrateCamera(
-                objpoints,
-                imgpoints1,
-                image_size,
-                None,
-                None
+        if direction not in ["H", "L"]:
+
+            print()
+            print(
+                "방향은 H 또는 L만 "
+                "입력할 수 있습니다."
             )
-        )
+
+            print()
+
+            continue
 
 
-        print("Camera 0")
-        print("fx =", mtx0[0, 0])
-        print("fy =", mtx0[1, 1])
-        print("cx =", mtx0[0, 2])
-        print("cy =", mtx0[1, 2])
-        print()
+        # ====================================================
+        # 스텝 확인
+        # ====================================================
 
-        print("Camera 1")
-        print("fx =", mtx1[0, 0])
-        print("fy =", mtx1[1, 1])
-        print("cx =", mtx1[0, 2])
-        print("cy =", mtx1[1, 2])
-        print()
+        try:
 
+            steps = int(parts[2])
 
-        # ==================================================
-        # Stereo calibration
-        # ==================================================
+        except ValueError:
 
-        stereo_flags = (
-            cv2.CALIB_FIX_INTRINSIC
-        )
-
-
-        stereo_criteria = (
-            cv2.TERM_CRITERIA_EPS
-            + cv2.TERM_CRITERIA_MAX_ITER,
-            100,
-            1e-5
-        )
-
-
-        ret_stereo, \
-        mtx0, dist0, \
-        mtx1, dist1, \
-        R, T, E, F = cv2.stereoCalibrate(
-            objpoints,
-            imgpoints0,
-            imgpoints1,
-            mtx0,
-            dist0,
-            mtx1,
-            dist1,
-            image_size,
-            criteria=stereo_criteria,
-            flags=stereo_flags
-        )
-
-
-        print()
-        print("Stereo RMS Error:")
-        print(ret_stereo)
-
-        print()
-        print("Rotation Matrix R:")
-        print(R)
-
-        print()
-        print("Translation Vector T:")
-        print(T)
-
-
-        # ==================================================
-        # 실제 baseline
-        # ==================================================
-
-        baseline = np.linalg.norm(T)
-
-        print()
-        print(
-            f"Calculated Baseline: "
-            f"{baseline:.4f} cm"
-        )
-
-
-        # ==================================================
-        # Stereo Rectification
-        # ==================================================
-
-        R1, R2, P1, P2, Q, roi1, roi2 = (
-            cv2.stereoRectify(
-                mtx0,
-                dist0,
-                mtx1,
-                dist1,
-                image_size,
-                R,
-                T,
-                alpha=0
+            print()
+            print(
+                "스텝 수는 숫자로 입력하세요."
             )
+
+            print()
+
+            continue
+
+
+        if steps <= 0:
+
+            print()
+            print(
+                "스텝 수는 1 이상이어야 합니다."
+            )
+
+            print()
+
+            continue
+
+
+        # ====================================================
+        # 이동
+        # ====================================================
+
+        move_motor(
+            axis,
+            direction,
+            steps
         )
 
 
-        # ==================================================
-        # Remap 생성
-        # ==================================================
+except KeyboardInterrupt:
 
-        map0_x, map0_y = cv2.initUndistortRectifyMap(
-            mtx0,
-            dist0,
-            R1,
-            P1,
-            image_size,
-            cv2.CV_32FC1
-        )
+    print()
+    print("강제 종료")
 
 
-        map1_x, map1_y = cv2.initUndistortRectifyMap(
-            mtx1,
-            dist1,
-            R2,
-            P2,
-            image_size,
-            cv2.CV_32FC1
-        )
+finally:
+
+    # ========================================================
+    # 종료 시 모든 축 Disable
+    # ========================================================
+
+    disable_all()
 
 
-        # ==================================================
-        # calibration 저장
-        # ==================================================
+    for axis in motors:
 
-        np.savez(
-            "stereo_calibration.npz",
+        motors[axis]["EN"].close()
 
-            mtx0=mtx0,
-            dist0=dist0,
+        motors[axis]["DIR"].close()
 
-            mtx1=mtx1,
-            dist1=dist1,
-
-            R=R,
-            T=T,
-
-            R1=R1,
-            R2=R2,
-
-            P1=P1,
-            P2=P2,
-
-            Q=Q,
-
-            map0_x=map0_x,
-            map0_y=map0_y,
-
-            map1_x=map1_x,
-            map1_y=map1_y
-        )
+        motors[axis]["PUL"].close()
 
 
-        print()
-        print("==========================================")
-        print("Calibration 완료")
-        print("==========================================")
-        print()
-        print(
-            "stereo_calibration.npz 저장 완료"
-        )
-        print()
-
-        break
-
-
-    # ==================================================
-    # Q 키
-    # ==================================================
-
-    if key == ord("q"):
-        break
-
-
-# ==================================================
-# 종료
-# ==================================================
-
-cv2.destroyAllWindows()
-
-cam0.stop()
-cam1.stop()
+    print(
+        "모든 모터를 정지하고 종료합니다."
+    )
