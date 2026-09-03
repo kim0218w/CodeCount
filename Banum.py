@@ -12,7 +12,6 @@ MIN_AREA = 300
 
 # 실험으로 얻은 보정식
 # Distance = A * disparity + B
-
 A = 0.08537908
 B = 15.13501923
 
@@ -52,38 +51,151 @@ time.sleep(2)
 
 
 # ==================================================
-# 노란색 타겟 색상 등록
+# 1단계
+# 두 카메라 실시간 영상 확인
 # ==================================================
 
-frame0 = cam0.capture_array()
+print()
+print("==========================================")
+print("Stereo Camera Preview")
+print("==========================================")
+print()
+print("물체를 두 카메라에 보이도록 위치시키세요.")
+print()
+print("r : 현재 화면에서 색상 영역 선택")
+print("q : 종료")
+print()
 
-frame0 = cv2.cvtColor(
-    frame0,
-    cv2.COLOR_RGB2BGR
+
+roi_frame = None
+
+
+while True:
+
+    frame0 = cam0.capture_array()
+    frame1 = cam1.capture_array()
+
+    frame0 = cv2.cvtColor(
+        frame0,
+        cv2.COLOR_RGB2BGR
+    )
+
+    frame1 = cv2.cvtColor(
+        frame1,
+        cv2.COLOR_RGB2BGR
+    )
+
+    # 안내 문구
+    cv2.putText(
+        frame0,
+        "Camera 0",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0),
+        2
+    )
+
+    cv2.putText(
+        frame1,
+        "Camera 1",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0),
+        2
+    )
+
+    cv2.putText(
+        frame0,
+        "Press R to select target",
+        (20, 75),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2
+    )
+
+    cv2.putText(
+        frame1,
+        "Press R to select target",
+        (20, 75),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2
+    )
+
+    # 두 화면을 옆으로 합침
+    preview = cv2.hconcat([
+        frame0,
+        frame1
+    ])
+
+    cv2.imshow(
+        "Stereo Camera Preview",
+        preview
+    )
+
+    key = cv2.waitKey(1) & 0xFF
+
+    # --------------------------------------------------
+    # R 키 → 현재 Camera 0 화면 저장 후 ROI 선택 단계
+    # --------------------------------------------------
+
+    if key == ord("r"):
+
+        roi_frame = frame0.copy()
+        break
+
+    # --------------------------------------------------
+    # Q 키 → 종료
+    # --------------------------------------------------
+
+    if key == ord("q"):
+
+        cv2.destroyAllWindows()
+
+        cam0.stop()
+        cam1.stop()
+
+        exit()
+
+
+cv2.destroyWindow(
+    "Stereo Camera Preview"
 )
 
+
+# ==================================================
+# 2단계
+# Camera 0 정지화면에서 노란 영역 선택
+# ==================================================
+
 print()
-print("==========================================")
-print("Stereo Distance Measurement")
-print("==========================================")
-print()
-print("노란색 물체의 내부를 선택하세요.")
-print("검은색 테두리는 제외하세요.")
+print("화면이 정지되었습니다.")
+print("Camera 0 화면에서 노란색 부분만 선택하세요.")
+print("검은 테두리는 가능하면 제외하세요.")
 print("선택 후 ENTER 또는 SPACE")
 print()
 
 
 roi = cv2.selectROI(
     "Select Yellow Area",
-    frame0,
+    roi_frame,
     fromCenter=False,
     showCrosshair=True
 )
 
-cv2.destroyWindow("Select Yellow Area")
+cv2.destroyWindow(
+    "Select Yellow Area"
+)
 
 
-x, y, w, h = [int(v) for v in roi]
+x, y, w, h = [
+    int(v)
+    for v in roi
+]
 
 
 if w == 0 or h == 0:
@@ -97,10 +209,14 @@ if w == 0 or h == 0:
 
 
 # ==================================================
-# 선택한 색상의 HSV 계산
+# 선택한 영역에서 HSV 계산
 # ==================================================
 
-selected = frame0[y:y+h, x:x+w]
+selected = roi_frame[
+    y:y+h,
+    x:x+w
+]
+
 
 hsv_selected = cv2.cvtColor(
     selected,
@@ -109,17 +225,36 @@ hsv_selected = cv2.cvtColor(
 
 
 h_mean = int(
-    np.median(hsv_selected[:, :, 0])
+    np.median(
+        hsv_selected[:, :, 0]
+    )
 )
 
 s_mean = int(
-    np.median(hsv_selected[:, :, 1])
+    np.median(
+        hsv_selected[:, :, 1]
+    )
 )
 
 v_mean = int(
-    np.median(hsv_selected[:, :, 2])
+    np.median(
+        hsv_selected[:, :, 2]
+    )
 )
 
+
+print()
+print("==========================================")
+print("선택한 색상 HSV")
+print("==========================================")
+print("H:", h_mean)
+print("S:", s_mean)
+print("V:", v_mean)
+
+
+# ==================================================
+# HSV 허용 범위
+# ==================================================
 
 H_MARGIN = 15
 S_MARGIN = 90
@@ -170,7 +305,7 @@ def detect_target(frame):
         kernel
     )
 
-    # 끊어진 부분 연결
+    # 끊어진 영역 연결
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_CLOSE,
@@ -196,7 +331,9 @@ def detect_target(frame):
         key=cv2.contourArea
     )
 
-    x, y, w, h = cv2.boundingRect(target)
+    x, y, w, h = cv2.boundingRect(
+        target
+    )
 
     cx = x + w / 2.0
     cy = y + h / 2.0
@@ -205,7 +342,7 @@ def detect_target(frame):
 
 
 # ==================================================
-# 거리값 안정화용
+# 거리값 안정화
 # ==================================================
 
 distance_history = []
@@ -214,14 +351,19 @@ HISTORY_SIZE = 10
 
 
 print()
-print("측정 시작")
+print()
+print("==========================================")
+print("실시간 Stereo 측정 시작")
+print("==========================================")
+print()
 print("사용 권장 범위: 5.5 ~ 13.5 cm")
 print("종료: q")
 print()
 
 
 # ==================================================
-# 실시간 처리
+# 3단계
+# 실시간 Stereo 처리
 # ==================================================
 
 while True:
@@ -248,7 +390,7 @@ while True:
 
 
     # ==================================================
-    # Camera 0 표시
+    # Camera 0
     # ==================================================
 
     if result0 is not None:
@@ -273,7 +415,7 @@ while True:
 
 
     # ==================================================
-    # Camera 1 표시
+    # Camera 1
     # ==================================================
 
     if result1 is not None:
@@ -298,7 +440,7 @@ while True:
 
 
     # ==================================================
-    # 두 카메라에서 물체가 모두 검출된 경우
+    # 두 카메라 모두 검출 성공
     # ==================================================
 
     if cx0 is not None and cx1 is not None:
@@ -306,8 +448,9 @@ while True:
         # Signed disparity
         disparity = cx0 - cx1
 
+
         # --------------------------------------------------
-        # 보정식으로 거리 계산
+        # 기존 보정식
         # --------------------------------------------------
 
         raw_distance = (
@@ -317,8 +460,7 @@ while True:
 
 
         # --------------------------------------------------
-        # 거리값 흔들림 감소
-        # 최근 10프레임 중앙값 사용
+        # 최근 10프레임 중앙값
         # --------------------------------------------------
 
         distance_history.append(
@@ -330,12 +472,14 @@ while True:
 
 
         distance = float(
-            np.median(distance_history)
+            np.median(
+                distance_history
+            )
         )
 
 
         # --------------------------------------------------
-        # 화면 출력
+        # Camera 0 정보
         # --------------------------------------------------
 
         cv2.putText(
@@ -349,6 +493,21 @@ while True:
         )
 
         cv2.putText(
+            frame0,
+            f"Disparity: {disparity:.1f}px",
+            (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
+
+
+        # --------------------------------------------------
+        # Camera 1 정보
+        # --------------------------------------------------
+
+        cv2.putText(
             frame1,
             f"X1: {cx1:.1f}",
             (20, 40),
@@ -358,18 +517,6 @@ while True:
             2
         )
 
-
-        cv2.putText(
-            frame0,
-            f"Disparity: {disparity:.1f}px",
-            (20, 75),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-
         cv2.putText(
             frame1,
             f"Disparity: {disparity:.1f}px",
@@ -382,65 +529,74 @@ while True:
 
 
         # --------------------------------------------------
-        # 신뢰 범위
+        # 거리 표시
         # --------------------------------------------------
 
         if MIN_DISTANCE <= distance <= MAX_DISTANCE:
 
-            text = f"Distance: {distance:.2f} cm"
-
-            cv2.putText(
-                frame0,
-                text,
-                (20, 115),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2
+            text = (
+                f"Distance: "
+                f"{distance:.2f} cm"
             )
 
-            cv2.putText(
-                frame1,
-                text,
-                (20, 115),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2
+            text_color = (
+                0,
+                255,
+                0
             )
 
         else:
 
-            text = f"Out of Range: {distance:.2f} cm"
-
-            cv2.putText(
-                frame0,
-                text,
-                (20, 115),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
+            text = (
+                f"Out of Range: "
+                f"{distance:.2f} cm"
             )
 
-            cv2.putText(
-                frame1,
-                text,
-                (20, 115),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
+            text_color = (
+                0,
+                0,
+                255
             )
+
+
+        cv2.putText(
+            frame0,
+            text,
+            (20, 115),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            text_color,
+            2
+        )
+
+        cv2.putText(
+            frame1,
+            text,
+            (20, 115),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            text_color,
+            2
+        )
 
 
     else:
 
-        # 검출 실패 시 이전 거리값 제거
+        # 한쪽이라도 검출 실패하면 이전 기록 제거
         distance_history.clear()
 
         cv2.putText(
             frame0,
+            "Target Not Found",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2
+        )
+
+        cv2.putText(
+            frame1,
             "Target Not Found",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -467,6 +623,7 @@ while True:
 
 
     key = cv2.waitKey(1) & 0xFF
+
 
     if key == ord("q"):
         break
