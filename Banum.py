@@ -2,26 +2,30 @@ from picamera2 import Picamera2
 import cv2
 import numpy as np
 import time
+import os
 
 
 # ==================================================
 # 설정
 # ==================================================
 
-MIN_AREA = 300
+# 체커보드 내부 코너 개수
+CHECKERBOARD = (7, 6)
 
-# 실험으로 얻은 보정식
-# Distance = A * disparity + B
-A = 0.08537908
-B = 15.13501923
+# 체커보드 한 칸 실제 크기(cm)
+# 반드시 실제 화면에서 자로 재서 수정!
+SQUARE_SIZE = 2.0
 
-# 현재 신뢰할 수 있는 측정 범위
-MIN_DISTANCE = 5.5
-MAX_DISTANCE = 13.5
+# 저장할 최소 이미지 수
+MIN_IMAGES = 10
+
+SAVE_DIR = "stereo_calibration"
+
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 
 # ==================================================
-# 카메라 설정
+# 카메라 시작
 # ==================================================
 
 cam0 = Picamera2(0)
@@ -51,319 +55,67 @@ time.sleep(2)
 
 
 # ==================================================
-# 1단계
-# 두 카메라 실시간 영상 확인
+# 체커보드 3D 좌표
 # ==================================================
+
+objp = np.zeros(
+    (CHECKERBOARD[0] * CHECKERBOARD[1], 3),
+    np.float32
+)
+
+objp[:, :2] = (
+    np.mgrid[
+        0:CHECKERBOARD[0],
+        0:CHECKERBOARD[1]
+    ]
+    .T
+    .reshape(-1, 2)
+)
+
+objp *= SQUARE_SIZE
+
+
+# ==================================================
+# 저장 데이터
+# ==================================================
+
+objpoints = []
+
+imgpoints0 = []
+imgpoints1 = []
+
+saved_count = 0
+
+
+# ==================================================
+# 코너 정밀화 조건
+# ==================================================
+
+criteria = (
+    cv2.TERM_CRITERIA_EPS
+    + cv2.TERM_CRITERIA_MAX_ITER,
+    30,
+    0.001
+)
+
 
 print()
 print("==========================================")
-print("Stereo Camera Preview")
+print("Stereo Calibration Capture")
 print("==========================================")
 print()
-print("물체를 두 카메라에 보이도록 위치시키세요.")
+print("체커보드를 두 카메라가 모두 볼 수 있게 하세요.")
 print()
-print("r : 현재 화면에서 색상 영역 선택")
+print("s : 현재 체커보드 위치 저장")
+print("c : calibration 실행")
 print("q : 종료")
 print()
-
-
-roi_frame = None
-
-
-while True:
-
-    frame0 = cam0.capture_array()
-    frame1 = cam1.capture_array()
-
-    frame0 = cv2.cvtColor(
-        frame0,
-        cv2.COLOR_RGB2BGR
-    )
-
-    frame1 = cv2.cvtColor(
-        frame1,
-        cv2.COLOR_RGB2BGR
-    )
-
-    # 안내 문구
-    cv2.putText(
-        frame0,
-        "Camera 0",
-        (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 255, 0),
-        2
-    )
-
-    cv2.putText(
-        frame1,
-        "Camera 1",
-        (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 255, 0),
-        2
-    )
-
-    cv2.putText(
-        frame0,
-        "Press R to select target",
-        (20, 75),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (255, 255, 255),
-        2
-    )
-
-    cv2.putText(
-        frame1,
-        "Press R to select target",
-        (20, 75),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (255, 255, 255),
-        2
-    )
-
-    # 두 화면을 옆으로 합침
-    preview = cv2.hconcat([
-        frame0,
-        frame1
-    ])
-
-    cv2.imshow(
-        "Stereo Camera Preview",
-        preview
-    )
-
-    key = cv2.waitKey(1) & 0xFF
-
-    # --------------------------------------------------
-    # R 키 → 현재 Camera 0 화면 저장 후 ROI 선택 단계
-    # --------------------------------------------------
-
-    if key == ord("r"):
-
-        roi_frame = frame0.copy()
-        break
-
-    # --------------------------------------------------
-    # Q 키 → 종료
-    # --------------------------------------------------
-
-    if key == ord("q"):
-
-        cv2.destroyAllWindows()
-
-        cam0.stop()
-        cam1.stop()
-
-        exit()
-
-
-cv2.destroyWindow(
-    "Stereo Camera Preview"
-)
-
-
-# ==================================================
-# 2단계
-# Camera 0 정지화면에서 노란 영역 선택
-# ==================================================
-
-print()
-print("화면이 정지되었습니다.")
-print("Camera 0 화면에서 노란색 부분만 선택하세요.")
-print("검은 테두리는 가능하면 제외하세요.")
-print("선택 후 ENTER 또는 SPACE")
-print()
-
-
-roi = cv2.selectROI(
-    "Select Yellow Area",
-    roi_frame,
-    fromCenter=False,
-    showCrosshair=True
-)
-
-cv2.destroyWindow(
-    "Select Yellow Area"
-)
-
-
-x, y, w, h = [
-    int(v)
-    for v in roi
-]
-
-
-if w == 0 or h == 0:
-
-    print("영역 선택 실패")
-
-    cam0.stop()
-    cam1.stop()
-
-    exit()
-
-
-# ==================================================
-# 선택한 영역에서 HSV 계산
-# ==================================================
-
-selected = roi_frame[
-    y:y+h,
-    x:x+w
-]
-
-
-hsv_selected = cv2.cvtColor(
-    selected,
-    cv2.COLOR_BGR2HSV
-)
-
-
-h_mean = int(
-    np.median(
-        hsv_selected[:, :, 0]
-    )
-)
-
-s_mean = int(
-    np.median(
-        hsv_selected[:, :, 1]
-    )
-)
-
-v_mean = int(
-    np.median(
-        hsv_selected[:, :, 2]
-    )
-)
-
-
-print()
-print("==========================================")
-print("선택한 색상 HSV")
-print("==========================================")
-print("H:", h_mean)
-print("S:", s_mean)
-print("V:", v_mean)
-
-
-# ==================================================
-# HSV 허용 범위
-# ==================================================
-
-H_MARGIN = 15
-S_MARGIN = 90
-V_MARGIN = 90
-
-
-lower = np.array([
-    max(0, h_mean - H_MARGIN),
-    max(30, s_mean - S_MARGIN),
-    max(30, v_mean - V_MARGIN)
-])
-
-
-upper = np.array([
-    min(179, h_mean + H_MARGIN),
-    min(255, s_mean + S_MARGIN),
-    min(255, v_mean + V_MARGIN)
-])
-
-
-kernel = np.ones(
-    (3, 3),
-    np.uint8
-)
-
-
-# ==================================================
-# 물체 검출 함수
-# ==================================================
-
-def detect_target(frame):
-
-    hsv = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2HSV
-    )
-
-    mask = cv2.inRange(
-        hsv,
-        lower,
-        upper
-    )
-
-    # 작은 잡음 제거
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_OPEN,
-        kernel
-    )
-
-    # 끊어진 영역 연결
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_CLOSE,
-        kernel
-    )
-
-    contours, _ = cv2.findContours(
-        mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    valid = [
-        c for c in contours
-        if cv2.contourArea(c) > MIN_AREA
-    ]
-
-    if not valid:
-        return None
-
-    target = max(
-        valid,
-        key=cv2.contourArea
-    )
-
-    x, y, w, h = cv2.boundingRect(
-        target
-    )
-
-    cx = x + w / 2.0
-    cy = y + h / 2.0
-
-    return x, y, w, h, cx, cy
-
-
-# ==================================================
-# 거리값 안정화
-# ==================================================
-
-distance_history = []
-
-HISTORY_SIZE = 10
-
-
-print()
-print()
-print("==========================================")
-print("실시간 Stereo 측정 시작")
-print("==========================================")
-print()
-print("사용 권장 범위: 5.5 ~ 13.5 cm")
-print("종료: q")
+print(f"최소 {MIN_IMAGES}장 이상 권장")
 print()
 
 
 # ==================================================
-# 3단계
-# 실시간 Stereo 처리
+# 촬영 단계
 # ==================================================
 
 while True:
@@ -381,223 +133,114 @@ while True:
         cv2.COLOR_RGB2BGR
     )
 
-    result0 = detect_target(frame0)
-    result1 = detect_target(frame1)
+    gray0 = cv2.cvtColor(
+        frame0,
+        cv2.COLOR_BGR2GRAY
+    )
 
-    cx0 = None
-    cx1 = None
-    disparity = None
+    gray1 = cv2.cvtColor(
+        frame1,
+        cv2.COLOR_BGR2GRAY
+    )
 
 
-    # ==================================================
-    # Camera 0
-    # ==================================================
+    # --------------------------------------------------
+    # 체커보드 탐색
+    # --------------------------------------------------
 
-    if result0 is not None:
+    ret0, corners0 = cv2.findChessboardCorners(
+        gray0,
+        CHECKERBOARD,
+        None
+    )
 
-        x0, y0, w0, h0, cx0, cy0 = result0
+    ret1, corners1 = cv2.findChessboardCorners(
+        gray1,
+        CHECKERBOARD,
+        None
+    )
 
-        cv2.rectangle(
+
+    # --------------------------------------------------
+    # Camera 0 표시
+    # --------------------------------------------------
+
+    if ret0:
+
+        corners0_refined = cv2.cornerSubPix(
+            gray0,
+            corners0,
+            (11, 11),
+            (-1, -1),
+            criteria
+        )
+
+        cv2.drawChessboardCorners(
             frame0,
-            (x0, y0),
-            (x0 + w0, y0 + h0),
-            (0, 255, 0),
-            2
+            CHECKERBOARD,
+            corners0_refined,
+            ret0
         )
-
-        cv2.circle(
-            frame0,
-            (int(cx0), int(cy0)),
-            5,
-            (0, 0, 255),
-            -1
-        )
-
-
-    # ==================================================
-    # Camera 1
-    # ==================================================
-
-    if result1 is not None:
-
-        x1, y1, w1, h1, cx1, cy1 = result1
-
-        cv2.rectangle(
-            frame1,
-            (x1, y1),
-            (x1 + w1, y1 + h1),
-            (0, 255, 0),
-            2
-        )
-
-        cv2.circle(
-            frame1,
-            (int(cx1), int(cy1)),
-            5,
-            (0, 0, 255),
-            -1
-        )
-
-
-    # ==================================================
-    # 두 카메라 모두 검출 성공
-    # ==================================================
-
-    if cx0 is not None and cx1 is not None:
-
-        # Signed disparity
-        disparity = cx0 - cx1
-
-
-        # --------------------------------------------------
-        # 기존 보정식
-        # --------------------------------------------------
-
-        raw_distance = (
-            A * disparity
-            + B
-        )
-
-
-        # --------------------------------------------------
-        # 최근 10프레임 중앙값
-        # --------------------------------------------------
-
-        distance_history.append(
-            raw_distance
-        )
-
-        if len(distance_history) > HISTORY_SIZE:
-            distance_history.pop(0)
-
-
-        distance = float(
-            np.median(
-                distance_history
-            )
-        )
-
-
-        # --------------------------------------------------
-        # Camera 0 정보
-        # --------------------------------------------------
 
         cv2.putText(
             frame0,
-            f"X0: {cx0:.1f}",
+            "Checkerboard: OK",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 0),
             2
         )
-
-        cv2.putText(
-            frame0,
-            f"Disparity: {disparity:.1f}px",
-            (20, 75),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-
-        # --------------------------------------------------
-        # Camera 1 정보
-        # --------------------------------------------------
-
-        cv2.putText(
-            frame1,
-            f"X1: {cx1:.1f}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2
-        )
-
-        cv2.putText(
-            frame1,
-            f"Disparity: {disparity:.1f}px",
-            (20, 75),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
-
-
-        # --------------------------------------------------
-        # 거리 표시
-        # --------------------------------------------------
-
-        if MIN_DISTANCE <= distance <= MAX_DISTANCE:
-
-            text = (
-                f"Distance: "
-                f"{distance:.2f} cm"
-            )
-
-            text_color = (
-                0,
-                255,
-                0
-            )
-
-        else:
-
-            text = (
-                f"Out of Range: "
-                f"{distance:.2f} cm"
-            )
-
-            text_color = (
-                0,
-                0,
-                255
-            )
-
-
-        cv2.putText(
-            frame0,
-            text,
-            (20, 115),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            text_color,
-            2
-        )
-
-        cv2.putText(
-            frame1,
-            text,
-            (20, 115),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            text_color,
-            2
-        )
-
 
     else:
 
-        # 한쪽이라도 검출 실패하면 이전 기록 제거
-        distance_history.clear()
-
         cv2.putText(
             frame0,
-            "Target Not Found",
+            "Checkerboard: NOT FOUND",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 0, 255),
             2
+        )
+
+
+    # --------------------------------------------------
+    # Camera 1 표시
+    # --------------------------------------------------
+
+    if ret1:
+
+        corners1_refined = cv2.cornerSubPix(
+            gray1,
+            corners1,
+            (11, 11),
+            (-1, -1),
+            criteria
+        )
+
+        cv2.drawChessboardCorners(
+            frame1,
+            CHECKERBOARD,
+            corners1_refined,
+            ret1
         )
 
         cv2.putText(
             frame1,
-            "Target Not Found",
+            "Checkerboard: OK",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
+
+    else:
+
+        cv2.putText(
+            frame1,
+            "Checkerboard: NOT FOUND",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
@@ -606,24 +249,329 @@ while True:
         )
 
 
-    # ==================================================
-    # 두 영상 합치기
-    # ==================================================
+    # --------------------------------------------------
+    # 저장 개수 표시
+    # --------------------------------------------------
+
+    text = f"Saved: {saved_count}"
+
+    cv2.putText(
+        frame0,
+        text,
+        (20, 75),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2
+    )
+
+    cv2.putText(
+        frame1,
+        text,
+        (20, 75),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2
+    )
+
 
     stereo_view = cv2.hconcat([
         frame0,
         frame1
     ])
 
-
     cv2.imshow(
-        "Stereo Distance Measurement",
+        "Stereo Calibration",
         stereo_view
     )
 
 
     key = cv2.waitKey(1) & 0xFF
 
+
+    # ==================================================
+    # S 키
+    # ==================================================
+
+    if key == ord("s"):
+
+        if ret0 and ret1:
+
+            objpoints.append(
+                objp.copy()
+            )
+
+            imgpoints0.append(
+                corners0_refined.copy()
+            )
+
+            imgpoints1.append(
+                corners1_refined.copy()
+            )
+
+
+            filename0 = os.path.join(
+                SAVE_DIR,
+                f"cam0_{saved_count:02d}.jpg"
+            )
+
+            filename1 = os.path.join(
+                SAVE_DIR,
+                f"cam1_{saved_count:02d}.jpg"
+            )
+
+
+            cv2.imwrite(
+                filename0,
+                frame0
+            )
+
+            cv2.imwrite(
+                filename1,
+                frame1
+            )
+
+
+            saved_count += 1
+
+            print(
+                f"[{saved_count}] 저장 완료"
+            )
+
+        else:
+
+            print(
+                "두 카메라 모두에서 체커보드가 보여야 저장됩니다."
+            )
+
+
+    # ==================================================
+    # C 키 → calibration
+    # ==================================================
+
+    if key == ord("c"):
+
+        if saved_count < MIN_IMAGES:
+
+            print()
+            print(
+                f"이미지가 부족합니다. "
+                f"현재 {saved_count}장"
+            )
+
+            print(
+                f"최소 {MIN_IMAGES}장 이상 저장하세요."
+            )
+
+            continue
+
+
+        print()
+        print("==========================================")
+        print("Calibration 시작")
+        print("==========================================")
+        print()
+
+
+        image_size = gray0.shape[::-1]
+
+
+        # ==================================================
+        # Camera 0 개별 calibration
+        # ==================================================
+
+        ret_cal0, mtx0, dist0, rvecs0, tvecs0 = (
+            cv2.calibrateCamera(
+                objpoints,
+                imgpoints0,
+                image_size,
+                None,
+                None
+            )
+        )
+
+
+        # ==================================================
+        # Camera 1 개별 calibration
+        # ==================================================
+
+        ret_cal1, mtx1, dist1, rvecs1, tvecs1 = (
+            cv2.calibrateCamera(
+                objpoints,
+                imgpoints1,
+                image_size,
+                None,
+                None
+            )
+        )
+
+
+        print("Camera 0")
+        print("fx =", mtx0[0, 0])
+        print("fy =", mtx0[1, 1])
+        print("cx =", mtx0[0, 2])
+        print("cy =", mtx0[1, 2])
+        print()
+
+        print("Camera 1")
+        print("fx =", mtx1[0, 0])
+        print("fy =", mtx1[1, 1])
+        print("cx =", mtx1[0, 2])
+        print("cy =", mtx1[1, 2])
+        print()
+
+
+        # ==================================================
+        # Stereo calibration
+        # ==================================================
+
+        stereo_flags = (
+            cv2.CALIB_FIX_INTRINSIC
+        )
+
+
+        stereo_criteria = (
+            cv2.TERM_CRITERIA_EPS
+            + cv2.TERM_CRITERIA_MAX_ITER,
+            100,
+            1e-5
+        )
+
+
+        ret_stereo, \
+        mtx0, dist0, \
+        mtx1, dist1, \
+        R, T, E, F = cv2.stereoCalibrate(
+            objpoints,
+            imgpoints0,
+            imgpoints1,
+            mtx0,
+            dist0,
+            mtx1,
+            dist1,
+            image_size,
+            criteria=stereo_criteria,
+            flags=stereo_flags
+        )
+
+
+        print()
+        print("Stereo RMS Error:")
+        print(ret_stereo)
+
+        print()
+        print("Rotation Matrix R:")
+        print(R)
+
+        print()
+        print("Translation Vector T:")
+        print(T)
+
+
+        # ==================================================
+        # 실제 baseline
+        # ==================================================
+
+        baseline = np.linalg.norm(T)
+
+        print()
+        print(
+            f"Calculated Baseline: "
+            f"{baseline:.4f} cm"
+        )
+
+
+        # ==================================================
+        # Stereo Rectification
+        # ==================================================
+
+        R1, R2, P1, P2, Q, roi1, roi2 = (
+            cv2.stereoRectify(
+                mtx0,
+                dist0,
+                mtx1,
+                dist1,
+                image_size,
+                R,
+                T,
+                alpha=0
+            )
+        )
+
+
+        # ==================================================
+        # Remap 생성
+        # ==================================================
+
+        map0_x, map0_y = cv2.initUndistortRectifyMap(
+            mtx0,
+            dist0,
+            R1,
+            P1,
+            image_size,
+            cv2.CV_32FC1
+        )
+
+
+        map1_x, map1_y = cv2.initUndistortRectifyMap(
+            mtx1,
+            dist1,
+            R2,
+            P2,
+            image_size,
+            cv2.CV_32FC1
+        )
+
+
+        # ==================================================
+        # calibration 저장
+        # ==================================================
+
+        np.savez(
+            "stereo_calibration.npz",
+
+            mtx0=mtx0,
+            dist0=dist0,
+
+            mtx1=mtx1,
+            dist1=dist1,
+
+            R=R,
+            T=T,
+
+            R1=R1,
+            R2=R2,
+
+            P1=P1,
+            P2=P2,
+
+            Q=Q,
+
+            map0_x=map0_x,
+            map0_y=map0_y,
+
+            map1_x=map1_x,
+            map1_y=map1_y
+        )
+
+
+        print()
+        print("==========================================")
+        print("Calibration 완료")
+        print("==========================================")
+        print()
+        print(
+            "stereo_calibration.npz 저장 완료"
+        )
+        print()
+
+        break
+
+
+    # ==================================================
+    # Q 키
+    # ==================================================
 
     if key == ord("q"):
         break
