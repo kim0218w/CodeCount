@@ -1,257 +1,310 @@
-import gpiod
-import gpiod.line as gpiod_line
+from picamera2 import Picamera2
+import cv2
+import numpy as np
 import time
-import threading
-import sys
 
-# ==================================================
-# 1. 3축 하드웨어 핀 세팅 (라파 5 / gpiod v2.x 기준)
-# ==================================================
-X_DIR, X_PULSE, X_ENA = 19,20,16
-Y_DIR, Y_PULSE, Y_ENA = 23,24,22
-Z_DIR, Z_PULSE, Z_ENA = 6, 13, 5
 
-# 라즈베리 파이 5 OS 버전에 따라 'gpiochip4' 또는 'gpiochip0' 사용
-chip = gpiod.Chip('/dev/gpiochip4')
+REAL_WIDTH = 1.0            # 정사각형 실제 폭(cm)
+REFERENCE_DISTANCE = 15.5   # 보정할 기준 거리(cm)
 
-# gpiod v2.x Enum 객체 사용 설정
-line_settings = gpiod.LineSettings(
-    direction=gpiod_line.Direction.OUTPUT,
-    bias=gpiod_line.Bias.PULL_UP
-)
+MIN_AREA = 100              # 너무 작은 잡음 제거용
 
-all_pins = [X_DIR, X_PULSE, X_ENA, Y_DIR, Y_PULSE, Y_ENA, Z_DIR, Z_PULSE, Z_ENA]
 
-# config 딕셔너리에 튜플 형태로 일괄 라인 요청
-request = chip.request_lines(
-    consumer="stepper_3axis_local",
-    config={tuple(all_pins): line_settings}
-)
+# 카메라 시작
 
-# 초기 상태: 모든 핀 HIGH 인가 (부팅 시 안전하게 전체 ENA 비활성화 등)
-request.set_values({pin: gpiod_line.Value.ACTIVE for pin in all_pins})
-time.sleep(0.5)
+picam2 = Picamera2()
 
-# ==================================================
-# 2. 🔌 특정 축만 전류 인가하고 나머지 차단하는 헬퍼 함수
-# ==================================================
-def enable_only_axis(active_axis_str):
-    """
-    선택된 축의 ENA는 LOW(활성화/전류 공급), 
-    나머지 축의 ENA는 HIGH(비활성화/전류 차단)로 설정합니다.
-    (※ 드라이버에 따라 활성화 레벨이 반대라면 INACTIVE와 ACTIVE를 교체하세요)
-    """
-    ena_map = {
-        "AXIS_X": X_ENA,
-        "AXIS_Y": Y_ENA,
-        "AXIS_Z": Z_ENA
+config = picam2.create_preview_configuration(
+    main={
+        "size": (640, 480),
+        "format": "RGB888"
     }
-    
-    for axis_name, ena_pin in ena_map.items():
-        if axis_name == active_axis_str:
-            # 구동할 축: 전류 공급 (활성화)
-            request.set_value(ena_pin, gpiod_line.Value.INACTIVE)
-        else:
-            # 나머지 축: 전류 차단 (토크 해제)
-            request.set_value(ena_pin, gpiod_line.Value.ACTIVE)
+)
 
-def disable_all_motors():
-    """모든 모터의 전류를 차단합니다."""
-    for ena_pin in [X_ENA, Y_ENA, Z_ENA]:
-        request.set_value(ena_pin, gpiod_line.Value.ACTIVE)
+picam2.configure(config)
+picam2.start()
 
-# ==================================================
-# 3. 🎮 수동 모드: 연속 구동용 멀티스레드 로직
-# ==================================================
-running_flags = {"AXIS_X": False, "AXIS_Y": False, "AXIS_Z": False}
-active_threads = {}
-CONTINUOUS_DELAY = 0.0008  
+time.sleep(2)
 
-def continuous_run_worker(axis_str, pulse_pin):
-    print(f"🔥 [{axis_str}] 실시간 연속 구동 스레드 가동!")
-    while running_flags[axis_str]:
-        request.set_value(pulse_pin, gpiod_line.Value.INACTIVE)
-        time.sleep(CONTINUOUS_DELAY)
-        request.set_value(pulse_pin, gpiod_line.Value.ACTIVE)
-        time.sleep(CONTINUOUS_DELAY)
-    
-    # 구동이 끝나면 해당 축 전류 차단
-    if axis_str == "AXIS_X": request.set_value(X_ENA, gpiod_line.Value.ACTIVE)
-    elif axis_str == "AXIS_Y": request.set_value(Y_ENA, gpiod_line.Value.ACTIVE)
-    elif axis_str == "AXIS_Z": request.set_value(Z_ENA, gpiod_line.Value.ACTIVE)
-    
-    print(f"🛑 [{axis_str}] 연속 구동 스레드 안전 정지 및 전류 차단.")
 
-def handle_manual_control(axis_str, action_str, direction_str):
-    global running_flags, active_threads
+# 기준 물체 색상 선택
 
-    if axis_str == "AXIS_X": dir_pin, pulse_pin = X_DIR, X_PULSE
-    elif axis_str == "AXIS_Y": dir_pin, pulse_pin = Y_DIR, Y_PULSE
-    elif axis_str == "AXIS_Z": dir_pin, pulse_pin = Z_DIR, Z_PULSE
-    else: return
+frame = picam2.capture_array()
+frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-    if action_str == "START":
-        if running_flags[axis_str]: return
-        
-        # 움직일 축만 전류를 켜고 나머지는 차단
-        enable_only_axis(axis_str)
-        time.sleep(0.01)
+print(f"정사각형을 카메라에서 {REFERENCE_DISTANCE} cm 거리에 놓으세요.")
+print("검은 테두리는 가능하면 제외")
+print("선택 후 ENTER 또는 SPACE")
 
-        dir_val = gpiod_line.Value.INACTIVE if direction_str == "DIR_CW" else gpiod_line.Value.ACTIVE
-        request.set_value(dir_pin, dir_val)
-        time.sleep(0.01)
+roi = cv2.selectROI(
+    "Select PINK Area",
+    frame,
+    fromCenter=False,
+    showCrosshair=True
+)
 
-        running_flags[axis_str] = True
-        t = threading.Thread(target=continuous_run_worker, args=(axis_str, pulse_pin), daemon=True)
-        active_threads[axis_str] = t
-        t.start()
+cv2.destroyWindow("Select PINK Area")
 
-    elif action_str == "STOP":
-        running_flags[axis_str] = False
+x, y, w, h = [int(v) for v in roi]
 
-# ==================================================
-# 4. ⚙️ 자동 모드: 정밀 이동용 S-Curve 알고리즘
-# ==================================================
-MAX_DELAY_US = 2500   
-MIN_DELAY_US = 800    
+if w == 0 or h == 0:
+    print("영역이 선택되지 않았습니다.")
+    picam2.stop()
+    exit()
 
-def smoothstep(x):
-    if x < 0.0: x = 0.0
-    if x > 1.0: x = 1.0
-    return x * x * (3.0 - 2.0 * x)
 
-def get_s_curve_delay(step_index, total_steps, max_delay, min_delay):
-    mid = (total_steps - 1) / 2.0
-    progress = step_index / mid if step_index <= mid else (total_steps - 1 - step_index) / mid
-    s = smoothstep(progress)
-    delay_f = float(max_delay) - s * float(max_delay - min_delay)
-    return max(delay_f, 1.0) / 1000000.0
+# 선택 영역에서 HSV 색상 추출
 
-def handle_auto_control(axis_str, direction_str, total_steps):
-    if axis_str == "AXIS_X": dir_pin, pulse_pin = X_DIR, X_PULSE
-    elif axis_str == "AXIS_Y": dir_pin, pulse_pin = Y_DIR, Y_PULSE
-    elif axis_str == "AXIS_Z": dir_pin, pulse_pin = Z_DIR, Z_PULSE
-    else: return
+selected = frame[y:y+h, x:x+w]
 
-    # 움직일 축만 전류 인가, 나머지 축 전류 차단
-    enable_only_axis(axis_str)
-    time.sleep(0.02)
+hsv_selected = cv2.cvtColor(
+    selected,
+    cv2.COLOR_BGR2HSV
+)
 
-    dir_val = gpiod_line.Value.INACTIVE if direction_str == "DIR_CW" else gpiod_line.Value.ACTIVE
-    request.set_value(dir_pin, dir_val)
-    time.sleep(0.05)
+# 중앙값 사용
+h_mean = int(np.median(hsv_selected[:, :, 0]))
+s_mean = int(np.median(hsv_selected[:, :, 1]))
+v_mean = int(np.median(hsv_selected[:, :, 2]))
 
-    print(f"🤖 [자동 모드] {axis_str} -> {direction_str}방향 {total_steps}스텝 가감속 시작")
-    for i in range(total_steps):
-        d = get_s_curve_delay(i, total_steps, MAX_DELAY_US, MIN_DELAY_US)
-        request.set_value(pulse_pin, gpiod_line.Value.INACTIVE)
-        time.sleep(d)
-        request.set_value(pulse_pin, gpiod_line.Value.ACTIVE)
-        time.sleep(d)
-        
-    # 구동 완료 후 해당 축 전류 차단
-    if axis_str == "AXIS_X": request.set_value(X_ENA, gpiod_line.Value.ACTIVE)
-    elif axis_str == "AXIS_Y": request.set_value(Y_ENA, gpiod_line.Value.ACTIVE)
-    elif axis_str == "AXIS_Z": request.set_value(Z_ENA, gpiod_line.Value.ACTIVE)
-    
-    print(f"▶ [{axis_str} 자동 구동 완료 및 전류 차단]")
+print()
+print("선택한 색상 HSV")
+print("H:", h_mean)
+print("S:", s_mean)
+print("V:", v_mean)
 
-# ==================================================
-# 5. 🚀 부팅 시 자동 테스트 모션 함수
-# ==================================================
-def run_startup_test():
-    print("==================================================")
-    print(" 🔍 시스템 부팅 완료: 3축 모터 초기화 테스트 시작")
-    print("==================================================")
-    
-    test_axes = [
-        ("AXIS_X", X_DIR, X_PULSE, X_ENA),
-        ("AXIS_Y", Y_DIR, Y_PULSE, Y_ENA),
-        ("AXIS_Z", Z_DIR, Z_PULSE, Z_ENA)
+
+# 색 허용 범위
+H_MARGIN = 15
+S_MARGIN = 80
+V_MARGIN = 80
+
+lower = np.array([
+    max(0, h_mean - H_MARGIN),
+    max(40, s_mean - S_MARGIN),
+    max(40, v_mean - V_MARGIN)
+])
+
+upper = np.array([
+    min(179, h_mean + H_MARGIN),
+    min(255, s_mean + S_MARGIN),
+    min(255, v_mean + V_MARGIN)
+])
+
+
+# 기준거리에서 자동 검출
+
+time.sleep(1)
+
+reference_width = None
+
+
+for _ in range(20):
+
+    frame = picam2.capture_array()
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    mask = cv2.inRange(
+        hsv,
+        lower,
+        upper
+    )
+
+    # 잡음 제거
+    kernel = np.ones((3, 3), np.uint8)
+
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
+
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
+
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    valid = [
+        c for c in contours
+        if cv2.contourArea(c) > MIN_AREA
     ]
-    
-    test_steps = 400  
-    
-    for axis_name, dir_pin, pulse_pin, ena_pin in test_axes:
-        # 테스트할 축만 전류 인가, 나머지 차단
-        enable_only_axis(axis_name)
-        time.sleep(0.05)
 
-        print(f"👉 [{axis_name}] 정방향(CW) 테스트 중...")
-        request.set_value(dir_pin, gpiod_line.Value.INACTIVE)
-        time.sleep(0.05)
-        
-        for _ in range(test_steps):
-            request.set_value(pulse_pin, gpiod_line.Value.INACTIVE)
-            time.sleep(0.0015)
-            request.set_value(pulse_pin, gpiod_line.Value.ACTIVE)
-            time.sleep(0.0015)
-            
-        time.sleep(0.3) 
-        
-        print(f"👉 [{axis_name}] 역방향(CCW) 복귀 중...")
-        request.set_value(dir_pin, gpiod_line.Value.ACTIVE)
-        time.sleep(0.05)
-        
-        for _ in range(test_steps):
-            request.set_value(pulse_pin, gpiod_line.Value.INACTIVE)
-            time.sleep(0.0015)
-            request.set_value(pulse_pin, gpiod_line.Value.ACTIVE)
-            time.sleep(0.0015)
-            
-        # 테스트 종료 후 해당 축 전류 차단
-        request.set_value(ena_pin, gpiod_line.Value.ACTIVE)
-        print(f"✅ [{axis_name}] 테스트 완료 및 전류 차단\n")
-        time.sleep(0.5)
+    if valid:
 
-    print("🎉 모든 축의 초기화 테스트가 성공적으로 끝났습니다!")
+        largest = max(
+            valid,
+            key=cv2.contourArea
+        )
 
-# ==================================================
-# 6. 로컬 테스트용 콘솔 인터페이스
-# ==================================================
-def local_console_interface():
-    run_startup_test()
+        rx, ry, rw, rh = cv2.boundingRect(largest)
 
-    print("==================================================")
-    print(" 🤖 라즈베리 파이 5 3축 스퍼모터 단독 제어 프로그램")
-    print("==================================================")
-    print(" [사용법 예시]")
-    print("  - 수동 시작: AXIS_X:START:DIR_CW (또는 DIR_CCW)")
-    print("  - 수동 정지: AXIS_X:STOP:DIR_CW")
-    print("  - 자동 이동: AXIS_X:AUTO:DIR_CW:1000 (축:모드:방향:스텝수)")
-    print("  - 종료: quit")
-    print("==================================================")
+        reference_width = rw
 
-    try:
-        while True:
-            user_input = input("명령어 입력 > ").strip()
-            if not user_input:
-                continue
-            if user_input.lower() == 'quit':
-                break
 
-            parts = user_input.split(':')
+if reference_width is None:
+    print("기준 물체를 찾지 못했습니다.")
+    picam2.stop()
+    exit()
 
-            if len(parts) == 3:
-                axis_packet, action_packet, dir_packet = parts
-                handle_manual_control(axis_packet, action_packet, dir_packet)
-                
-            elif len(parts) == 4:
-                axis_packet, _, dir_packet, steps_packet = parts
-                handle_auto_control(axis_packet, dir_packet, int(steps_packet))
-            else:
-                print("❌ 잘못된 형식입니다. 다시 입력해주세요.")
 
-    except KeyboardInterrupt:
-        print("\n사용자에 의해 강제 중단되었습니다.")
-    finally:
-        for axis in running_flags:
-            running_flags[axis] = False
-        time.sleep(0.2)
-        disable_all_motors()
-        request.release()
-        chip.close()
-        print("안전하게 하드웨어 자원 반환 완료.")
+# 초점거리 계산
+focal_length = (
+    reference_width
+    * REFERENCE_DISTANCE
+    / REAL_WIDTH
+)
 
-if __name__ == "__main__":
-    local_console_interface()
+print(f"실제 폭       : {REAL_WIDTH:.2f} cm")
+print(f"기준 거리     : {REFERENCE_DISTANCE:.2f} cm")
+print(f"기준 픽셀 폭  : {reference_width} px")
+print(f"초점거리      : {focal_length:.2f} px")
+print("종료: q")
+print()
+
+
+# 실시간 자동 거리 측정
+
+while True:
+
+    frame = picam2.capture_array()
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    hsv = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2HSV
+    )
+
+    mask = cv2.inRange(
+        hsv,
+        lower,
+        upper
+    )
+
+    kernel = np.ones((3, 3), np.uint8)
+
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
+
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
+
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    valid = [
+        c for c in contours
+        if cv2.contourArea(c) > MIN_AREA
+    ]
+
+
+    if valid:
+
+        # 가장 큰 영역
+        largest = max(
+            valid,
+            key=cv2.contourArea
+        )
+
+        x, y, w, h = cv2.boundingRect(largest)
+
+        if w > 0:
+
+            distance = (
+                REAL_WIDTH
+                * focal_length
+                / w
+            )
+
+            center_x = x + w // 2
+            center_y = y + h // 2
+
+            # 자동 검출 Bounding Box
+            cv2.rectangle(
+                frame,
+                (x, y),
+                (x + w, y + h),
+                (0, 255, 0),
+                2
+            )
+
+            # 중심
+            cv2.circle(
+                frame,
+                (center_x, center_y),
+                5,
+                (0, 0, 255),
+                -1
+            )
+
+            # 거리
+            cv2.putText(
+                frame,
+                f"Distance: {distance:.2f} cm",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2
+            )
+
+            # 현재 폭
+            cv2.putText(
+                frame,
+                f"Width: {w} px",
+                (20, 75),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+
+    else:
+
+        cv2.putText(
+            frame,
+            "Target Not Found",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2
+        )
+
+
+    cv2.imshow(
+        "Automatic Distance Measurement",
+        frame
+    )
+
+    cv2.imshow(
+        "Mask",
+        mask
+    )
+
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q"):
+        break
+
+
+cv2.destroyAllWindows()
+picam2.stop()
