@@ -2,7 +2,7 @@
 
 파일 실행 방법
 
-cd로 파일 위치 맞추고 ㅠ
+cd로 파일 위치 맞추고 
 python3 calibration.py
 
 #카메라의 필요한 사진 위치
