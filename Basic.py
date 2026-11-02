@@ -1,24 +1,43 @@
 
+import json
 import math
 import time
-
+from pathlib import Path
 from gpiozero import Button, OutputDevice
 
 # ============================================
 # 1. GPIO Configuration
 # ============================================
 
-AXIS_PINS = {
+PINS = {
     "X": {"PUL": 26, "DIR": 19, "ENA": 13, "HOME": 2},
     "Y": {"PUL": 21, "DIR": 20, "ENA": 16, "HOME": 4},
-    "Z": {"PUL": 6, "DIR": 5, "ENA": 0, "HOME": 3}
+    "Z": {"PUL": 6,  "DIR": 5,  "ENA": 0, "HOME": 3},
 }
-
-ENA_ACTIVE_HIGH = True
 
 # ============================================
 # 2. Motion Configuration
 # ============================================
+
+PULSES_PER_MM = {
+    "X": 794.70,
+    "Y": 843.59,
+    "Z": 765.55
+}
+
+ENA_ACTIVE_HIGH = True
+HOME_SIGNAL_INVERTED = True
+
+HOME_ORDER = ("Z", "X", "Y")
+
+HOME_RATE = 500.0
+MAX_HOME_SECONDS = 120.0
+
+MAX_HOME_STEPS = {
+    "X": 60000,
+    "Y": 60000,
+    "Z": 60000
+}
 
 MAX_STEP_RATE = {
     "X": 8400.0,
@@ -32,73 +51,290 @@ MAX_ACCEL = {
     "Z": 800.0
 }
 
-PULSES_PER_MM = {
-    "X": 794.70,
-    "Y": 843.59,
-    "Z": 765.55
-}
-
 PULSE_HIGH_S = 0.0002
 CONTROL_INTERVAL_S = 0.001
-MAX_COMMAND_STEPS = 200000
 
-# ============================================
-# 3. Homing Configuration
-# ============================================
+MAX_JOG_STEPS = 20000
 
-HOME_DIRECTION = {
-    "X": "H",
-    "Y": "H",
-    "Z": "H"
+# Temporary software travel limits
+MAX_POSITION_STEPS = {
+    "X": 200000,
+    "Y": 200000,
+    "Z": 200000
 }
 
-HOMING_ORDER = ["Z", "X", "Y"]
+SAVE_FILE = Path(__file__).with_name(
+    "robot_positions.json"
+)
 
-HOMING_STEP_RATE = 500.0
-HOMING_TIMEOUT = 120.0
+motors = {}
+sensors = {}
 
-# Adjust to actual mechanical travel limits.
-MAX_HOMING_STEPS = {
-    "X": 60000,
-    "Y": 60000,
-    "Z": 60000
+position_steps = {
+    axis: None for axis in PINS
 }
 
-# The existing switch test reported reversed states.
-HOME_SIGNAL_INVERTED = True
+saved_positions = {}
 
 # ============================================
-# 4. Position 1 Configuration
+# 3. Sensor Functions
 # ============================================
 
-# Distance from each homing reference in mm.
-# Positive coordinates move away from the home switch.
-# Set all three values before automatic movement.
+def switch_pressed(axis):
 
-POSITION_1_MM = {
-    "X": None,
-    "Y": None,
-    "Z": None
-}
+    raw = sensors[axis].is_pressed
+
+    if HOME_SIGNAL_INVERTED:
+        return not raw
+
+    return raw
+
+
+def direction(axis, toward_home):
+
+    if toward_home:
+        motors[axis]["DIR"].on()
+    else:
+        motors[axis]["DIR"].off()
+
+    time.sleep(0.01)
+
+
+def pulse(axis):
+
+    motors[axis]["PUL"].on()
+
+    time.sleep(PULSE_HIGH_S)
+
+    motors[axis]["PUL"].off()
+
 
 # ============================================
-# 5. S-Curve Functions
+# 4. GPIO Initialization
 # ============================================
 
-def profile_steps(elapsed, duration, steps):
+def init_gpio():
 
-    s = max(0.0, min(elapsed / duration, 1.0))
+    for axis, p in PINS.items():
 
-    smooth = (
-        10 * s**3
-        - 15 * s**4
-        + 6 * s**5
+        motors[axis] = {
+            "ENA": OutputDevice(
+                p["ENA"],
+                active_high=ENA_ACTIVE_HIGH,
+                initial_value=False
+            ),
+
+            "DIR": OutputDevice(
+                p["DIR"],
+                initial_value=False
+            ),
+
+            "PUL": OutputDevice(
+                p["PUL"],
+                initial_value=False
+            )
+        }
+
+        sensors[axis] = Button(
+            p["HOME"],
+            pull_up=True,
+            bounce_time=0.05
+        )
+
+
+# ============================================
+# 5. Position File Functions
+# ============================================
+
+def load_positions():
+
+    if SAVE_FILE.exists():
+
+        with SAVE_FILE.open(
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            loaded = json.load(f)
+
+        for key in ("1", "2"):
+
+            data = loaded.get(key)
+
+            if (
+                isinstance(data, dict)
+                and all(
+                    isinstance(data.get(a), int)
+                    for a in PINS
+                )
+            ):
+
+                saved_positions[key] = {
+                    a: data[a] for a in PINS
+                }
+
+
+def save_position(number):
+
+    if any(
+        value is None
+        for value in position_steps.values()
+    ):
+
+        print(
+            "ERROR: All axes must be homed first."
+        )
+        return
+
+    saved_positions[number] = position_steps.copy()
+
+    with SAVE_FILE.open(
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            saved_positions,
+            f,
+            indent=2
+        )
+
+    print(
+        f"Position {number} saved to {SAVE_FILE.name}"
     )
 
-    return steps * smooth
+    show_position(saved_positions[number])
 
 
-def move_duration(axis, steps):
+def show_position(steps):
+
+    for axis in PINS:
+
+        count = steps[axis]
+
+        if count is None:
+            value = "UNKNOWN"
+
+        else:
+            mm = count / PULSES_PER_MM[axis]
+
+            value = (
+                f"{count} steps "
+                f"({mm:.3f} mm)"
+            )
+
+        print(f"  {axis}: {value}")
+
+
+# ============================================
+# 6. Homing Functions
+# ============================================
+
+def home_axis(axis):
+
+    if switch_pressed(axis):
+
+        raise RuntimeError(
+            f"{axis}: Switch already active. "
+            f"Release it before homing."
+        )
+
+    print(
+        f"[{axis}] Homing towards H..."
+    )
+
+    direction(axis, True)
+
+    motor = motors[axis]
+
+    motor["ENA"].on()
+
+    count = 0
+    start = time.perf_counter()
+
+    try:
+
+        while not switch_pressed(axis):
+
+            if (
+                time.perf_counter() - start
+                >= MAX_HOME_SECONDS
+            ):
+
+                raise TimeoutError(
+                    f"{axis}: Home timeout"
+                )
+
+            if count >= MAX_HOME_STEPS[axis]:
+
+                raise RuntimeError(
+                    f"{axis}: Home step limit"
+                )
+
+            t0 = time.perf_counter()
+
+            pulse(axis)
+
+            count += 1
+
+            remaining = (
+                1.0 / HOME_RATE
+                - (time.perf_counter() - t0)
+            )
+
+            if remaining > 0:
+                time.sleep(remaining)
+
+        position_steps[axis] = 0
+
+        print(
+            f"[{axis}] HOME reached, position = 0"
+        )
+
+    finally:
+
+        motor["PUL"].off()
+        motor["ENA"].off()
+
+
+def home_all():
+
+    for axis in PINS:
+
+        if switch_pressed(axis):
+
+            print(
+                f"ERROR: {axis} switch is "
+                f"already pressed. Homing cancelled."
+            )
+
+            return
+
+    for axis in PINS:
+        position_steps[axis] = None
+
+    try:
+
+        for axis in HOME_ORDER:
+            home_axis(axis)
+
+    except BaseException:
+
+        for axis in PINS:
+            position_steps[axis] = None
+
+        raise
+
+    print(
+        "Homing complete: X=0, Y=0, Z=0"
+    )
+
+
+# ============================================
+# 7. S-Curve Functions
+# ============================================
+
+def duration(axis, steps):
 
     return max(
         1.875 * steps / MAX_STEP_RATE[axis],
@@ -109,272 +345,137 @@ def move_duration(axis, steps):
     )
 
 
-# ============================================
-# 6. GPIO Initialization
-# ============================================
+def shaped_steps(elapsed, total_time, steps):
 
-motors = {}
-sensors = {}
+    s = min(
+        1.0,
+        max(0.0, elapsed / total_time)
+    )
 
-position_steps = {
-    "X": None,
-    "Y": None,
-    "Z": None
-}
-
-
-def initialize_gpio():
-
-    for axis, pins in AXIS_PINS.items():
-
-        motors[axis] = {
-            "ENA": OutputDevice(
-                pins["ENA"],
-                active_high=ENA_ACTIVE_HIGH,
-                initial_value=False
-            ),
-
-            "DIR": OutputDevice(
-                pins["DIR"],
-                initial_value=False
-            ),
-
-            "PUL": OutputDevice(
-                pins["PUL"],
-                initial_value=False
-            )
-        }
-
-        sensors[axis] = Button(
-            pin=pins["HOME"],
-            pull_up=True,
-            bounce_time=0.05
-        )
-
-
-def home_pressed(axis):
-
-    raw_state = sensors[axis].is_pressed
-
-    if HOME_SIGNAL_INVERTED:
-        return not raw_state
-
-    return raw_state
-
-
-def set_direction(axis, direction):
-
-    if direction == "H":
-        motors[axis]["DIR"].on()
-
-    elif direction == "L":
-        motors[axis]["DIR"].off()
-
-    else:
-        raise ValueError("Invalid direction")
-
-
-def pulse(axis):
-
-    motors[axis]["PUL"].on()
-    time.sleep(PULSE_HIGH_S)
-    motors[axis]["PUL"].off()
-
-
-def disable_all():
-
-    for motor in motors.values():
-        motor["ENA"].off()
+    return steps * (
+        10 * s**3
+        - 15 * s**4
+        + 6 * s**5
+    )
 
 
 # ============================================
-# 7. Homing
+# 8. Manual Jog Movement
 # ============================================
 
-def home_axis(axis):
-
-    print(f"\n[{axis}] Homing started")
-
-    # Refuse to move if the sensor is already active.
-    if home_pressed(axis):
-        raise RuntimeError(
-            f"{axis}: Home switch already active"
-        )
-
-    motor = motors[axis]
-
-    set_direction(axis, HOME_DIRECTION[axis])
-    time.sleep(0.02)
-
-    motor["ENA"].on()
-    time.sleep(0.02)
-
-    start_time = time.perf_counter()
-    emitted_steps = 0
-
-    # GPIO software pulse timing is not deterministic.
-    step_interval = 1.0 / HOMING_STEP_RATE
-
-    try:
-
-        while True:
-
-            # Stop immediately when the switch is detected.
-            if home_pressed(axis):
-                position_steps[axis] = 0
-
-                print(
-                    f"[{axis}] HOME DETECTED "
-                    f"({emitted_steps} steps)"
-                )
-
-                return
-
-            elapsed = time.perf_counter() - start_time
-
-            if elapsed >= HOMING_TIMEOUT:
-                raise TimeoutError(
-                    f"{axis}: Homing timeout"
-                )
-
-            if emitted_steps >= MAX_HOMING_STEPS[axis]:
-                raise RuntimeError(
-                    f"{axis}: Homing step limit reached"
-                )
-
-            step_start = time.perf_counter()
-
-            pulse(axis)
-            emitted_steps += 1
-
-            # Wait only for remaining step interval.
-            remaining = (
-                step_interval
-                - (time.perf_counter() - step_start)
-            )
-
-            if remaining > 0:
-                time.sleep(remaining)
-
-    finally:
-
-        motor["PUL"].off()
-        motor["ENA"].off()
-
-
-def home_all():
-
-    print("\n===================================")
-    print(" XYZ Homing Sequence")
-    print("===================================")
-
-    # Check all switches before starting.
-    for axis in AXIS_PINS:
-        if home_pressed(axis):
-            raise RuntimeError(
-                f"{axis}: Switch active before homing"
-            )
-
-    # Reset position validity.
-    for axis in position_steps:
-        position_steps[axis] = None
-
-    # Sequential homing for initial safety testing.
-    for axis in HOMING_ORDER:
-        home_axis(axis)
-
-    print("\nAll axes homed successfully")
-    print("Home position: X=0, Y=0, Z=0")
-
-
-# ============================================
-# 8. S-Curve Motor Movement
-# ============================================
-
-def move_motor(axis, direction, steps):
-
-    if steps <= 0:
-        return
-
-    if steps > MAX_COMMAND_STEPS:
-        raise ValueError(
-            f"{axis}: Step limit exceeded"
-        )
+def jog(axis, dir_text, steps):
 
     if position_steps[axis] is None:
-        raise RuntimeError(
-            f"{axis}: Axis is not homed"
-        )
 
-    # Do not move toward an already active home switch.
-    if direction == "H" and home_pressed(axis):
-        raise RuntimeError(
-            f"{axis}: Home switch is active"
+        print(
+            "ERROR: Home all axes before jogging."
         )
+        return
+
+    if not (1 <= steps <= MAX_JOG_STEPS):
+
+        print(
+            f"ERROR: Jog steps must be "
+            f"1..{MAX_JOG_STEPS}."
+        )
+        return
+
+    toward_home = dir_text == "H"
+
+    old = position_steps[axis]
+
+    if toward_home:
+        target = old - steps
+    else:
+        target = old + steps
+
+    if not (
+        0 <= target <= MAX_POSITION_STEPS[axis]
+    ):
+
+        print(
+            "ERROR: Requested move exceeds "
+            "temporary software position limit."
+        )
+        return
+
+    if toward_home and switch_pressed(axis):
+
+        print(
+            "ERROR: Home switch already pressed."
+        )
+        return
 
     motor = motors[axis]
 
-    set_direction(axis, direction)
-    time.sleep(0.01)
+    direction(axis, toward_home)
 
     motor["ENA"].on()
-    time.sleep(0.02)
 
-    duration = move_duration(axis, steps)
-
-    start_time = time.perf_counter()
     done = 0
 
-    print(
-        f"[{axis}] Move {direction}, {steps} steps"
-    )
+    total_time = duration(axis, steps)
+
+    start = time.perf_counter()
 
     try:
 
         while done < steps:
 
-            # Prevent further movement into the home switch.
-            if direction == "H" and home_pressed(axis):
-                position_steps[axis] = None
+            if toward_home and switch_pressed(axis):
+
                 raise RuntimeError(
-                    f"{axis}: Home limit triggered"
+                    f"{axis}: Home switch triggered "
+                    "during jog"
                 )
 
-            elapsed = time.perf_counter() - start_time
+            elapsed = (
+                time.perf_counter() - start
+            )
 
-            if elapsed >= duration:
-                target = steps
+            if elapsed >= total_time:
+                expected = steps
 
             else:
-                target = min(
+                expected = min(
                     steps,
                     int(
-                        profile_steps(
+                        shaped_steps(
                             elapsed,
-                            duration,
+                            total_time,
                             steps
                         )
                     )
                 )
 
-            if target > done:
+            if done < expected:
+
                 pulse(axis)
+
                 done += 1
 
-                if direction == "H":
+                if toward_home:
                     position_steps[axis] -= 1
+
                 else:
                     position_steps[axis] += 1
 
             else:
-                time.sleep(CONTROL_INTERVAL_S)
 
-        print(f"[{axis}] Move completed")
+                time.sleep(
+                    CONTROL_INTERVAL_S
+                )
+
+        print(
+            f"[{axis}] Moved {done} steps ({dir_text})"
+        )
+
+        show_position(position_steps)
 
     except BaseException:
 
-        # Position is untrusted after an interrupted move.
         position_steps[axis] = None
+
         raise
 
     finally:
@@ -384,117 +485,158 @@ def move_motor(axis, direction, steps):
 
 
 # ============================================
-# 9. Move to Position 1
-# ============================================
-
-def move_to_position_1():
-
-    if any(
-        value is None
-        for value in POSITION_1_MM.values()
-    ):
-        print(
-            "\nPosition 1 is not configured."
-        )
-        print(
-            "Set X, Y, Z coordinates in POSITION_1_MM."
-        )
-        return
-
-    print("\nMoving to Position 1")
-
-    for axis in ["X", "Y", "Z"]:
-
-        target_mm = POSITION_1_MM[axis]
-
-        if target_mm < 0:
-            raise ValueError(
-                f"{axis}: Negative position is not allowed"
-            )
-
-        target_steps = round(
-            target_mm * PULSES_PER_MM[axis]
-        )
-
-        current_steps = position_steps[axis]
-
-        if current_steps is None:
-            raise RuntimeError(
-                f"{axis}: Position is unknown"
-            )
-
-        delta = target_steps - current_steps
-
-        if delta > 0:
-            direction = "L"
-
-        elif delta < 0:
-            direction = "H"
-
-        else:
-            continue
-
-        move_motor(
-            axis,
-            direction,
-            abs(delta)
-        )
-
-    print("\nPosition 1 movement completed")
-
-
-# ============================================
-# 10. Main
+# 9. Main Program
 # ============================================
 
 def main():
 
     try:
 
-        initialize_gpio()
+        init_gpio()
 
-        print("===================================")
-        print(" Raspberry Pi 5 XYZ Controller")
-        print(" Homing + S-Curve")
-        print("===================================")
+        load_positions()
 
-        print("\nHome sensor states:")
+        print(
+            "==================================="
+        )
+        print(
+            " Raspberry Pi 5 XYZ Position Setup"
+        )
+        print(
+            " Homing + S-Curve + Position Save"
+        )
+        print(
+            "==================================="
+        )
 
-        for axis in AXIS_PINS:
-            print(
-                f"{axis}: "
-                f"{'PRESSED' if home_pressed(axis) else 'RELEASED'}"
+        print("Commands:")
+        print("HOME")
+        print("X L 1000")
+        print("X H 500")
+        print("Y L 1000")
+        print("Z L 1000")
+        print("POS")
+        print("SAVE 1")
+        print("SAVE 2")
+        print("SHOW")
+        print("Q")
+
+        print("\nSensor check:")
+
+        for axis in PINS:
+
+            state = (
+                "PRESSED"
+                if switch_pressed(axis)
+                else "RELEASED"
             )
 
-        print("\nType HOME to start homing.")
-        command = input("Command > ").strip().upper()
+            print(f"{axis}: {state}")
 
-        if command != "HOME":
-            print("Homing cancelled")
-            return
+        while True:
 
-        home_all()
+            command = input(
+                "\nCommand > "
+            ).strip().upper()
 
-        move_to_position_1()
+            parts = command.split()
 
-    except KeyboardInterrupt:
-        print("\nEmergency user interruption")
+            if not parts:
+                continue
 
-    except Exception as e:
-        print(f"\nERROR: {e}")
+            # Exit
+            if parts == ["Q"]:
+                break
+
+            # Homing
+            elif parts == ["HOME"]:
+
+                home_all()
+
+            # Current position
+            elif parts == ["POS"]:
+
+                show_position(position_steps)
+
+            # Show saved positions
+            elif parts == ["SHOW"]:
+
+                for n in ("1", "2"):
+
+                    print(f"Position {n}:")
+
+                    if n in saved_positions:
+
+                        show_position(
+                            saved_positions[n]
+                        )
+
+                    else:
+                        print("  NOT SAVED")
+
+            # Save position
+            elif (
+                len(parts) == 2
+                and parts[0] == "SAVE"
+                and parts[1] in ("1", "2")
+            ):
+
+                save_position(parts[1])
+
+            # Manual movement
+            elif (
+                len(parts) == 3
+                and parts[0] in PINS
+                and parts[1] in ("H", "L")
+            ):
+
+                try:
+
+                    steps = int(parts[2])
+
+                except ValueError:
+
+                    print(
+                        "ERROR: Step count must "
+                        "be an integer."
+                    )
+                    continue
+
+                jog(
+                    parts[0],
+                    parts[1],
+                    steps
+                )
+
+            else:
+
+                print(
+                    "Invalid command. "
+                    "Example: X L 1000"
+                )
+
+    except (KeyboardInterrupt, EOFError):
+
+        print("\nInterrupted")
+
+    except Exception as exc:
+
+        print(f"ERROR: {exc}")
 
     finally:
 
-        disable_all()
-
         for motor in motors.values():
+
+            motor["ENA"].off()
+            motor["PUL"].off()
+
             for device in motor.values():
                 device.close()
 
         for sensor in sensors.values():
             sensor.close()
 
-        print("GPIO resources released")
+        print("GPIO released")
 
 
 if __name__ == "__main__":
