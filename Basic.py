@@ -6,7 +6,7 @@ import time
 from gpiozero import OutputDevice
 
 # ==============================================
-# 1. GPIO 설정 (BCM 번호)
+# 1. GPIO Configuration (BCM Numbering)
 # ==============================================
 
 AXIS_PINS = {
@@ -15,13 +15,13 @@ AXIS_PINS = {
     "Z": {"PUL": 6,  "DIR": 5,  "ENA": 0},
 }
 
-# ENA 활성화 방식
+# Enable polarity
 # True  : HIGH = Enable
 # False : LOW  = Enable
 ENA_ACTIVE_HIGH = True
 
 # ==============================================
-# 2. 모터 속도 및 가속도
+# 2. Motor Speed and Acceleration
 # ==============================================
 
 MAX_STEP_RATE = {
@@ -41,10 +41,11 @@ CONTROL_INTERVAL_S = 0.001
 MAX_COMMAND_STEPS = 20000
 
 # ==============================================
-# 3. S-Curve 위치 계산
+# 3. S-Curve Position Calculation
 # ==============================================
 
 def profile_steps(elapsed, duration, steps):
+
     s = max(0.0, min(elapsed / duration, 1.0))
 
     smooth = (
@@ -57,7 +58,7 @@ def profile_steps(elapsed, duration, steps):
 
 
 # ==============================================
-# 4. 이동 시간 계산
+# 4. Move Duration Calculation
 # ==============================================
 
 def move_duration(axis, steps):
@@ -72,7 +73,7 @@ def move_duration(axis, steps):
 
 
 # ==============================================
-# 5. 메인 프로그램
+# 5. Main Program
 # ==============================================
 
 def main():
@@ -80,7 +81,7 @@ def main():
     motors = {}
 
     try:
-        # GPIO 초기화
+        # Initialize GPIO
         for axis, pins in AXIS_PINS.items():
 
             motors[axis] = {
@@ -109,49 +110,49 @@ def main():
         print(" S-Curve ON / ZVD OFF")
         print("===================================")
 
-        print("입력 예시:")
+        print("Command examples:")
         print("X H 100")
         print("X L 100")
         print("Y H 100")
         print("Z H 100")
-        print("종료: Q")
+        print("Exit: Q")
 
         while True:
 
             command = input(
-                "\n명령 입력 > "
+                "\nEnter command > "
             ).strip().upper()
 
             parts = command.split()
 
-            # 종료
+            # Exit
             if parts == ["Q"]:
                 break
 
-            # 입력 검사
+            # Validate input
             if len(parts) != 3:
-                print("입력 오류. 예: X H 100")
+                print("Invalid input. Example: X H 100")
                 continue
 
             axis, direction, steps_text = parts
 
             if axis not in motors:
-                print("축은 X, Y, Z만 가능합니다.")
+                print("Valid axes: X, Y, Z")
                 continue
 
             if direction not in ("H", "L"):
-                print("방향은 H 또는 L입니다.")
+                print("Direction must be H or L.")
                 continue
 
             try:
                 steps = int(steps_text)
 
             except ValueError:
-                print("스텝 수는 정수여야 합니다.")
+                print("Step count must be an integer.")
                 continue
 
             if not 1 <= steps <= MAX_COMMAND_STEPS:
-                print("스텝 수 범위를 확인하세요.")
+                print("Step count is out of range.")
                 continue
 
             motor = motors[axis]
@@ -161,12 +162,12 @@ def main():
             )
 
             print(
-                f"\n[{axis}축] {direction} 방향 "
-                f"{steps}스텝 이동 시작"
+                f"\n[{axis} Axis] Direction: {direction}, "
+                f"Steps: {steps}"
             )
 
             try:
-                # 회전 방향 설정
+                # Set direction
                 if direction == "H":
                     motor["DIR"].on()
                 else:
@@ -174,14 +175,14 @@ def main():
 
                 time.sleep(0.01)
 
-                # 모터 Enable
+                # Enable motor
                 motor["ENA"].on()
                 time.sleep(0.02)
 
                 start = time.perf_counter()
                 done = 0
 
-                # S-Curve 펄스 출력
+                # Generate S-Curve step pulses
                 while done < steps:
 
                     elapsed = (
@@ -217,8 +218,8 @@ def main():
                         )
 
                 print(
-                    f"[{axis}축] 이동 완료: "
-                    f"{done}스텝"
+                    f"[{axis} Axis] Move completed: "
+                    f"{done} steps"
                 )
 
             finally:
@@ -226,11 +227,11 @@ def main():
                 motor["ENA"].off()
 
     except (KeyboardInterrupt, EOFError):
-        print("\n사용자 종료")
+        print("\nProgram interrupted.")
 
     finally:
 
-        # 모든 모터 Disable
+        # Disable all motors
         for motor in motors.values():
 
             motor["ENA"].off()
@@ -238,7 +239,7 @@ def main():
             for device in motor.values():
                 device.close()
 
-        print("GPIO 자원 해제 완료")
+        print("GPIO resources released.")
 
 
 if __name__ == "__main__":
