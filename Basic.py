@@ -1,246 +1,84 @@
 
-#!/usr/bin/env python3
-
-import math
 import time
-from gpiozero import OutputDevice
+from gpiozero import Button
 
 # ==============================================
-# 1. GPIO Configuration (BCM Numbering)
+# 1. Homing Sensor GPIO Configuration
 # ==============================================
 
-AXIS_PINS = {
-    "X": {"PUL": 26, "DIR": 19, "ENA": 13},
-    "Y": {"PUL": 21, "DIR": 20, "ENA": 16},
-    "Z": {"PUL": 6,  "DIR": 5,  "ENA": 0},
+HOME_PINS = {
+    "X": 2,
+    "Y": 3,
+    "Z": 4
 }
 
-# Enable polarity
-# True  : HIGH = Enable
-# False : LOW  = Enable
-ENA_ACTIVE_HIGH = True
+# True: COM + NO, switch connected to GND
+# False: COM + NC, switch connected to GND
+USE_NO_SWITCH = True
+
+sensors = {}
 
 # ==============================================
-# 2. Motor Speed and Acceleration
+# 2. Sensor Event Handlers
 # ==============================================
 
-MAX_STEP_RATE = {
-    "X": 400.0,
-    "Y": 400.0,
-    "Z": 300.0
-}
+def sensor_pressed(axis):
+    print(f"[{axis}] PRESSED", flush=True)
 
-MAX_ACCEL = {
-    "X": 500.0,
-    "Y": 500.0,
-    "Z": 350.0
-}
 
-PULSE_HIGH_S = 0.0002
-CONTROL_INTERVAL_S = 0.001
-MAX_COMMAND_STEPS = 20000
-
-# ==============================================
-# 3. S-Curve Position Calculation
-# ==============================================
-
-def profile_steps(elapsed, duration, steps):
-
-    s = max(0.0, min(elapsed / duration, 1.0))
-
-    smooth = (
-        10 * s**3
-        - 15 * s**4
-        + 6 * s**5
-    )
-
-    return steps * smooth
+def sensor_released(axis):
+    print(f"[{axis}] RELEASED", flush=True)
 
 
 # ==============================================
-# 4. Move Duration Calculation
+# 3. Main
 # ==============================================
 
-def move_duration(axis, steps):
+try:
+    for axis, pin in HOME_PINS.items():
 
-    return max(
-        1.875 * steps / MAX_STEP_RATE[axis],
-        math.sqrt(
-            5.7735 * steps / MAX_ACCEL[axis]
-        ),
-        0.05
-    )
+        sensor = Button(
+            pin=pin,
+            pull_up=True,
+            active_state=None,
+            bounce_time=0.05
+        )
 
+        sensors[axis] = sensor
 
-# ==============================================
-# 5. Main Program
-# ==============================================
+        sensor.when_pressed = (
+            lambda axis=axis: sensor_pressed(axis)
+        )
 
-def main():
+        sensor.when_released = (
+            lambda axis=axis: sensor_released(axis)
+        )
 
-    motors = {}
+    print("===================================")
+    print(" XYZ Homing Sensor Test")
+    print("===================================")
 
-    try:
-        # Initialize GPIO
-        for axis, pins in AXIS_PINS.items():
+    print("X : GPIO 2")
+    print("Y : GPIO 3")
+    print("Z : GPIO 4")
+    print()
 
-            motors[axis] = {
-                "ENA": OutputDevice(
-                    pins["ENA"],
-                    active_high=ENA_ACTIVE_HIGH,
-                    initial_value=False
-                ),
+    print("Press each homing switch.")
+    print("Press Ctrl+C to exit.")
+    print()
 
-                "DIR": OutputDevice(
-                    pins["DIR"],
-                    active_high=True,
-                    initial_value=False
-                ),
+    for axis, sensor in sensors.items():
+        state = "PRESSED" if sensor.is_pressed else "RELEASED"
+        print(f"[{axis}] Initial state: {state}")
 
-                "PUL": OutputDevice(
-                    pins["PUL"],
-                    active_high=True,
-                    initial_value=False
-                )
-            }
+    while True:
+        time.sleep(0.1)
 
-        print("===================================")
-        print(" Raspberry Pi 5")
-        print(" XYZ Stepper Motor Test")
-        print(" S-Curve ON / ZVD OFF")
-        print("===================================")
+except KeyboardInterrupt:
+    print("\nTest stopped.")
 
-        print("Command examples:")
-        print("X H 100")
-        print("X L 100")
-        print("Y H 100")
-        print("Z H 100")
-        print("Exit: Q")
+finally:
+    for sensor in sensors.values():
+        sensor.close()
 
-        while True:
-
-            command = input(
-                "\nEnter command > "
-            ).strip().upper()
-
-            parts = command.split()
-
-            # Exit
-            if parts == ["Q"]:
-                break
-
-            # Validate input
-            if len(parts) != 3:
-                print("Invalid input. Example: X H 100")
-                continue
-
-            axis, direction, steps_text = parts
-
-            if axis not in motors:
-                print("Valid axes: X, Y, Z")
-                continue
-
-            if direction not in ("H", "L"):
-                print("Direction must be H or L.")
-                continue
-
-            try:
-                steps = int(steps_text)
-
-            except ValueError:
-                print("Step count must be an integer.")
-                continue
-
-            if not 1 <= steps <= MAX_COMMAND_STEPS:
-                print("Step count is out of range.")
-                continue
-
-            motor = motors[axis]
-
-            duration = move_duration(
-                axis, steps
-            )
-
-            print(
-                f"\n[{axis} Axis] Direction: {direction}, "
-                f"Steps: {steps}"
-            )
-
-            try:
-                # Set direction
-                if direction == "H":
-                    motor["DIR"].on()
-                else:
-                    motor["DIR"].off()
-
-                time.sleep(0.01)
-
-                # Enable motor
-                motor["ENA"].on()
-                time.sleep(0.02)
-
-                start = time.perf_counter()
-                done = 0
-
-                # Generate S-Curve step pulses
-                while done < steps:
-
-                    elapsed = (
-                        time.perf_counter() - start
-                    )
-
-                    if elapsed >= duration:
-                        target = steps
-
-                    else:
-                        target = min(
-                            steps,
-                            int(
-                                profile_steps(
-                                    elapsed,
-                                    duration,
-                                    steps
-                                )
-                            )
-                        )
-
-                    if target > done:
-
-                        motor["PUL"].on()
-                        time.sleep(PULSE_HIGH_S)
-                        motor["PUL"].off()
-
-                        done += 1
-
-                    else:
-                        time.sleep(
-                            CONTROL_INTERVAL_S
-                        )
-
-                print(
-                    f"[{axis} Axis] Move completed: "
-                    f"{done} steps"
-                )
-
-            finally:
-                motor["PUL"].off()
-                motor["ENA"].off()
-
-    except (KeyboardInterrupt, EOFError):
-        print("\nProgram interrupted.")
-
-    finally:
-
-        # Disable all motors
-        for motor in motors.values():
-
-            motor["ENA"].off()
-
-            for device in motor.values():
-                device.close()
-
-        print("GPIO resources released.")
-
-
-if __name__ == "__main__":
-    main()
+    print("GPIO resources released.")
