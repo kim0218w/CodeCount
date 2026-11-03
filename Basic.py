@@ -1,6 +1,8 @@
 
+import json
 import math
 import time
+from pathlib import Path
 from gpiozero import Button, OutputDevice
 
 # ============================================
@@ -23,8 +25,14 @@ ENA_ACTIVE_HIGH = True
 HOME_SIGNAL_INVERTED = True
 
 # ============================================
-# 2. Motion Configuration
+# 2. XYZ Motion Configuration
 # ============================================
+
+PULSES_PER_MM = {
+    "X": 794.70,
+    "Y": 843.59,
+    "Z": 765.55
+}
 
 MAX_STEP_RATE = {
     "X": 8400.0,
@@ -41,36 +49,21 @@ MAX_ACCEL = {
 PULSE_HIGH_S = 0.0002
 CONTROL_INTERVAL_S = 0.001
 
-PULSES_PER_MM = {
-    "X": 794.70,
-    "Y": 843.59,
-    "Z": 765.55
+MAX_JOG_STEPS = 250000
+
+MAX_POSITION_STEPS = {
+    "X": 200000,
+    "Y": 200000,
+    "Z": 250000
 }
 
 # ============================================
-# 3. ZVD Input Shaping
-# ============================================
-
-INPUT_SHAPING = True
-
-RESONANCE_FREQ = {
-    "X": 40.0,
-    "Y": 40.0,
-    "Z": 40.0
-}
-
-DAMPING_RATIO = {
-    "X": 0.05,
-    "Y": 0.05,
-    "Z": 0.05
-}
-
-# ============================================
-# 4. Homing Configuration
+# 3. Homing Configuration
 # ============================================
 
 HOME_ORDER = ["Z", "X", "Y"]
-HOME_RATE = 1500.0
+
+HOME_RATE = 3500.0
 MAX_HOME_SECONDS = 240.0
 
 MAX_HOME_STEPS = {
@@ -79,32 +72,8 @@ MAX_HOME_STEPS = {
     "Z": 220000
 }
 
-MAX_POSITION_STEPS = {
-    "X": 200000,
-    "Y": 200000,
-    "Z": 220000
-}
-
 # ============================================
-# 5. Saved Positions
-# ============================================
-
-POSITION_1 = {
-    "X": 100750,
-    "Y": 12250,
-    "Z": 203000
-}
-
-POSITION_2 = {
-    "X": 102000,
-    "Y": 139250,
-    "Z": 202500
-}
-
-Z_LIFT_STEPS = 4000
-
-# ============================================
-# 6. Alpha Configuration
+# 4. Alpha Configuration
 # ============================================
 
 ALPHA_STEPS = 1050
@@ -115,12 +84,15 @@ ALPHA_CLOSE_DIRECTION = "H"
 ALPHA_PULSE_HIGH_S = 0.0002
 ALPHA_PULSE_LOW_S = 0.001
 
-PICKUP_WAIT_S = 1.0
-RELEASE_WAIT_S = 1.0
+MAX_ALPHA_JOG_STEPS = 1050
 
 # ============================================
-# 7. Global State
+# 5. Position Storage
 # ============================================
+
+SAVE_FILE = Path(__file__).with_name(
+    "robot_positions.json"
+)
 
 motors = {}
 sensors = {}
@@ -132,41 +104,43 @@ position_steps = {
     "Z": None
 }
 
+saved_positions = {}
+
 alpha_state = "UNKNOWN"
 
 # ============================================
-# 8. GPIO Initialization
+# 6. GPIO Initialization
 # ============================================
 
-def make_motor(pins):
+def make_motor(p):
 
     return {
         "ENA": OutputDevice(
-            pins["ENA"],
+            p["ENA"],
             active_high=ENA_ACTIVE_HIGH,
             initial_value=False
         ),
         "DIR": OutputDevice(
-            pins["DIR"],
+            p["DIR"],
             initial_value=False
         ),
         "PUL": OutputDevice(
-            pins["PUL"],
+            p["PUL"],
             initial_value=False
         )
     }
 
 
-def initialize_gpio():
+def init_gpio():
 
     global alpha
 
-    for axis, pins in PINS.items():
+    for axis, p in PINS.items():
 
-        motors[axis] = make_motor(pins)
+        motors[axis] = make_motor(p)
 
         sensors[axis] = Button(
-            pins["HOME"],
+            p["HOME"],
             pull_up=True,
             bounce_time=0.05
         )
@@ -174,19 +148,22 @@ def initialize_gpio():
     alpha = make_motor(ALPHA_PINS)
 
 
-def home_pressed(axis):
+def switch_pressed(axis):
 
-    state = sensors[axis].is_pressed
+    raw = sensors[axis].is_pressed
 
-    return not state if HOME_SIGNAL_INVERTED else state
+    if HOME_SIGNAL_INVERTED:
+        return not raw
+
+    return raw
 
 
-def set_direction(motor, direction):
+def set_direction(motor, dir_text):
 
-    if direction == "H":
+    if dir_text == "H":
         motor["DIR"].on()
 
-    elif direction == "L":
+    elif dir_text == "L":
         motor["DIR"].off()
 
     else:
@@ -202,57 +179,145 @@ def pulse(motor, high_time):
     motor["PUL"].off()
 
 
-def invalidate_positions():
+# ============================================
+# 7. Position File Functions
+# ============================================
 
-    for axis in position_steps:
-        position_steps[axis] = None
+def load_positions():
+
+    if not SAVE_FILE.exists():
+        return
+
+    with SAVE_FILE.open(
+        "r",
+        encoding="utf-8"
+    ) as f:
+        data = json.load(f)
+
+    for number in ("1", "2"):
+
+        saved = data.get(number)
+
+        if not isinstance(saved, dict):
+            continue
+
+        if all(
+            type(saved.get(axis)) is int
+            for axis in PINS
+        ):
+            saved_positions[number] = {
+                axis: saved[axis]
+                for axis in PINS
+            }
+
+
+def show_position(steps):
+
+    for axis in PINS:
+
+        count = steps[axis]
+
+        if count is None:
+            print(f"{axis}: UNKNOWN")
+
+        else:
+
+            mm = count / PULSES_PER_MM[axis]
+
+            print(
+                f"{axis}: {count} steps "
+                f"({mm:.3f} mm)"
+            )
+
+
+def save_position(number):
+
+    if any(
+        value is None
+        for value in position_steps.values()
+    ):
+        print("ERROR: Homing required")
+        return
+
+    saved_positions[number] = position_steps.copy()
+
+    with SAVE_FILE.open(
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            saved_positions,
+            f,
+            indent=2
+        )
+
+    print(f"Position {number} saved")
+
+    show_position(saved_positions[number])
+
+
+def show_saved_positions():
+
+    for number in ("1", "2"):
+
+        print(f"\nPosition {number}:")
+
+        if number in saved_positions:
+            show_position(saved_positions[number])
+
+        else:
+            print("NOT SAVED")
 
 
 # ============================================
-# 9. Homing Functions
+# 8. Homing Functions
 # ============================================
 
 def home_axis(axis):
 
-    if home_pressed(axis):
+    if switch_pressed(axis):
         raise RuntimeError(
-            f"{axis}: Home switch already pressed"
+            f"{axis}: Home switch already active"
         )
 
     motor = motors[axis]
 
-    print(f"[{axis}] Homing towards H")
+    print(f"[{axis}] Homing towards H...")
 
     set_direction(motor, "H")
 
     motor["ENA"].on()
-    time.sleep(0.02)
 
-    start = time.perf_counter()
     count = 0
-    interval = 1.0 / HOME_RATE
+    start = time.perf_counter()
 
     try:
 
-        while not home_pressed(axis):
+        while not switch_pressed(axis):
 
-            if time.perf_counter() - start >= MAX_HOME_SECONDS:
+            if (
+                time.perf_counter() - start
+                >= MAX_HOME_SECONDS
+            ):
                 raise TimeoutError(
                     f"{axis}: Homing timeout"
                 )
 
             if count >= MAX_HOME_STEPS[axis]:
                 raise RuntimeError(
-                    f"{axis}: Homing step limit"
+                    f"{axis}: Home step limit"
                 )
 
             t0 = time.perf_counter()
 
             pulse(motor, PULSE_HIGH_S)
+
             count += 1
 
-            remaining = interval - (
-                time.perf_counter() - t0
+            remaining = (
+                1.0 / HOME_RATE
+                - (time.perf_counter() - t0)
             )
 
             if remaining > 0:
@@ -260,7 +325,7 @@ def home_axis(axis):
 
         position_steps[axis] = 0
 
-        print(f"[{axis}] HOME detected")
+        print(f"[{axis}] HOME reached")
 
     finally:
 
@@ -272,12 +337,14 @@ def home_all():
 
     for axis in PINS:
 
-        if home_pressed(axis):
-            raise RuntimeError(
-                f"{axis}: Home switch already active"
+        if switch_pressed(axis):
+            print(
+                f"ERROR: {axis} home switch active"
             )
+            return
 
-    invalidate_positions()
+    for axis in PINS:
+        position_steps[axis] = None
 
     try:
 
@@ -286,15 +353,18 @@ def home_all():
 
     except BaseException:
 
-        invalidate_positions()
+        for axis in PINS:
+            position_steps[axis] = None
+
         raise
 
-    print("XYZ homing completed")
-    show_position()
+    print("\nXYZ homing completed")
+
+    show_position(position_steps)
 
 
 # ============================================
-# 10. S-Curve Functions
+# 9. S-Curve Functions
 # ============================================
 
 def move_duration(axis, steps):
@@ -308,144 +378,66 @@ def move_duration(axis, steps):
     )
 
 
-def s_curve_position(t, duration, steps):
+def shaped_steps(elapsed, total_time, steps):
 
-    if t <= 0:
-        return 0.0
+    s = min(
+        1.0,
+        max(0.0, elapsed / total_time)
+    )
 
-    if t >= duration:
-        return float(steps)
-
-    s = t / duration
-
-    smooth = (
+    return steps * (
         10 * s**3
         - 15 * s**4
         + 6 * s**5
     )
 
-    return steps * smooth
-
 
 # ============================================
-# 11. ZVD Input Shaper
+# 10. XYZ Manual Jog
 # ============================================
 
-def get_zvd_shaper(axis):
+def jog(axis, dir_text, steps):
 
-    freq = RESONANCE_FREQ[axis]
-    zeta = DAMPING_RATIO[axis]
+    if position_steps[axis] is None:
+        print("ERROR: Homing required")
+        return
 
-    if freq <= 0:
-        raise ValueError("Invalid resonance frequency")
+    if not 1 <= steps <= MAX_JOG_STEPS:
+        print("ERROR: Invalid jog step count")
+        return
 
-    zeta = max(0.0, min(zeta, 0.99))
-
-    sqrt_term = math.sqrt(1.0 - zeta * zeta)
-
-    K = math.exp(
-        (-zeta * math.pi) / sqrt_term
-    )
-
-    Td = 1.0 / (
-        2.0 * freq * sqrt_term
-    )
-
-    A1 = 1.0 / ((1.0 + K) ** 2)
-    A2 = 2.0 * K / ((1.0 + K) ** 2)
-    A3 = (K ** 2) / ((1.0 + K) ** 2)
-
-    return [
-        (0.0, A1),
-        (Td, A2),
-        (2.0 * Td, A3)
-    ]
-
-
-def shaped_position(axis, t, duration, steps):
-
-    if not INPUT_SHAPING:
-
-        return s_curve_position(
-            t, duration, steps
-        )
-
-    result = 0.0
-
-    for delay, amplitude in get_zvd_shaper(axis):
-
-        result += (
-            amplitude
-            * s_curve_position(
-                t - delay,
-                duration,
-                steps
-            )
-        )
-
-    return result
-
-
-# ============================================
-# 12. XYZ Axis Movement
-# ============================================
-
-def move_axis(axis, target):
+    toward_home = dir_text == "H"
 
     current = position_steps[axis]
 
-    if current is None:
-        raise RuntimeError(
-            f"{axis}: Homing required"
-        )
+    if toward_home:
+        target = current - steps
+    else:
+        target = current + steps
 
     if not 0 <= target <= MAX_POSITION_STEPS[axis]:
-        raise ValueError(
-            f"{axis}: Target exceeds position limit"
-        )
-
-    delta = target - current
-
-    if delta == 0:
+        print("ERROR: Position limit exceeded")
         return
 
-    direction = "L" if delta > 0 else "H"
-    steps = abs(delta)
-
-    if direction == "H" and home_pressed(axis):
-        raise RuntimeError(
-            f"{axis}: Home switch active"
-        )
+    if toward_home and switch_pressed(axis):
+        print("ERROR: Home switch active")
+        return
 
     motor = motors[axis]
 
-    set_direction(motor, direction)
+    set_direction(motor, dir_text)
 
     motor["ENA"].on()
-    time.sleep(0.02)
 
-    duration = move_duration(axis, steps)
-
-    if INPUT_SHAPING:
-        final_delay = get_zvd_shaper(axis)[-1][0]
-    else:
-        final_delay = 0.0
-
-    total_time = duration + final_delay
-
-    start = time.perf_counter()
     done = 0
-
-    print(
-        f"[{axis}] {direction}: "
-        f"{current} -> {target}"
-    )
+    total_time = move_duration(axis, steps)
+    start = time.perf_counter()
 
     try:
 
         while done < steps:
 
-            if direction == "H" and home_pressed(axis):
+            if toward_home and switch_pressed(axis):
                 raise RuntimeError(
                     f"{axis}: Home switch triggered"
                 )
@@ -459,34 +451,37 @@ def move_axis(axis, target):
                 expected = min(
                     steps,
                     int(
-                        shaped_position(
-                            axis,
+                        shaped_steps(
                             elapsed,
-                            duration,
+                            total_time,
                             steps
                         )
                     )
                 )
 
-            # One pulse per iteration to avoid large bursts.
             if done < expected:
 
                 pulse(motor, PULSE_HIGH_S)
+
                 done += 1
 
-                if direction == "L":
-                    position_steps[axis] += 1
-                else:
+                if toward_home:
                     position_steps[axis] -= 1
+                else:
+                    position_steps[axis] += 1
 
             else:
                 time.sleep(CONTROL_INTERVAL_S)
 
-        print(f"[{axis}] Move completed")
+        print(
+            f"[{axis}] Moved {done} steps ({dir_text})"
+        )
+
+        show_position(position_steps)
 
     except BaseException:
 
-        invalidate_positions()
+        position_steps[axis] = None
         raise
 
     finally:
@@ -496,14 +491,26 @@ def move_axis(axis, target):
 
 
 # ============================================
-# 13. Alpha Motor Control
+# 11. Alpha Manual Control
 # ============================================
 
-def move_alpha(direction, steps):
+def move_alpha(dir_text, steps):
+
+    global alpha_state
+
+    if dir_text not in ("H", "L"):
+        print("ERROR: Invalid alpha direction")
+        return False
+
+    if not 1 <= steps <= MAX_ALPHA_JOG_STEPS:
+        print("ERROR: Invalid alpha step count")
+        return False
 
     motor = alpha
 
-    set_direction(motor, direction)
+    set_direction(motor, dir_text)
+
+    alpha_state = "UNKNOWN"
 
     motor["ENA"].on()
     time.sleep(0.02)
@@ -512,14 +519,17 @@ def move_alpha(direction, steps):
 
         for _ in range(steps):
 
-            pulse(
-                motor,
-                ALPHA_PULSE_HIGH_S
-            )
+            motor["PUL"].on()
+            time.sleep(ALPHA_PULSE_HIGH_S)
 
-            time.sleep(
-                ALPHA_PULSE_LOW_S
-            )
+            motor["PUL"].off()
+            time.sleep(ALPHA_PULSE_LOW_S)
+
+        print(
+            f"[ALPHA] Moved {steps} steps ({dir_text})"
+        )
+
+        return True
 
     finally:
 
@@ -531,158 +541,40 @@ def alpha_open():
 
     global alpha_state
 
-    if alpha_state == "OPEN":
-        return
-
     if alpha_state != "CLOSED":
-        raise RuntimeError(
-            "Alpha state unknown"
-        )
+        print("ERROR: Confirm alpha CLOSED first")
+        return
 
     print("[ALPHA] Opening - G3")
 
-    alpha_state = "UNKNOWN"
-
-    move_alpha(
+    if move_alpha(
         ALPHA_OPEN_DIRECTION,
         ALPHA_STEPS
-    )
-
-    alpha_state = "OPEN"
-
-    print("[ALPHA] Open completed")
+    ):
+        alpha_state = "OPEN"
+        print("[ALPHA] Open command completed")
 
 
 def alpha_close():
 
     global alpha_state
 
-    if alpha_state == "CLOSED":
-        return
-
     if alpha_state != "OPEN":
-        raise RuntimeError(
-            "Alpha state unknown"
-        )
+        print("ERROR: Confirm alpha OPEN first")
+        return
 
     print("[ALPHA] Closing - G9")
 
-    alpha_state = "UNKNOWN"
-
-    move_alpha(
+    if move_alpha(
         ALPHA_CLOSE_DIRECTION,
         ALPHA_STEPS
-    )
-
-    alpha_state = "CLOSED"
-
-    print("[ALPHA] Close completed")
-
-
-# ============================================
-# 14. Position Display
-# ============================================
-
-def show_position():
-
-    print("\nCurrent position:")
-
-    for axis in PINS:
-
-        steps = position_steps[axis]
-
-        if steps is None:
-            print(f"{axis}: UNKNOWN")
-
-        else:
-
-            mm = steps / PULSES_PER_MM[axis]
-
-            print(
-                f"{axis}: {steps} steps "
-                f"({mm:.3f} mm)"
-            )
-
-    print(f"Alpha: {alpha_state}")
-
-
-# ============================================
-# 15. Position 1 Movement
-# ============================================
-
-def go_position_1():
-
-    print("\nMoving to Position 1")
-
-    safe_z = min(
-        position_steps["Z"],
-        POSITION_1["Z"] - Z_LIFT_STEPS
-    )
-
-    if safe_z < 0:
-        raise RuntimeError("Invalid safe Z")
-
-    move_axis("Z", safe_z)
-
-    move_axis("X", POSITION_1["X"])
-    move_axis("Y", POSITION_1["Y"])
-
-    move_axis("Z", POSITION_1["Z"])
-
-    print("Position 1 reached")
-
-
-# ============================================
-# 16. Automatic Transfer
-# ============================================
-
-def start_transfer():
-
-    if any(
-        position_steps[axis] is None
-        for axis in PINS
     ):
-        raise RuntimeError(
-            "XYZ homing required"
-        )
-
-    if alpha_state != "CLOSED":
-        raise RuntimeError(
-            "Alpha must be confirmed closed"
-        )
-
-    print("\n===================================")
-    print(" Automatic Transfer START")
-    print("===================================")
-
-    # Step 1: Move to Position 1
-    go_position_1()
-
-    # Step 2: Open Alpha
-    alpha_open()
-    time.sleep(PICKUP_WAIT_S)
-
-    # Step 3: Lift Z
-    lift_z = POSITION_1["Z"] - Z_LIFT_STEPS
-    move_axis("Z", lift_z)
-
-    # Step 4: Move XY to Position 2
-    move_axis("X", POSITION_2["X"])
-    move_axis("Y", POSITION_2["Y"])
-
-    # Step 5: Lower Z
-    move_axis("Z", POSITION_2["Z"])
-
-    # Step 6: Close Alpha
-    alpha_close()
-    time.sleep(RELEASE_WAIT_S)
-
-    print("\nAutomatic transfer completed")
-    show_position()
+        alpha_state = "CLOSED"
+        print("[ALPHA] Close command completed")
 
 
 # ============================================
-# 17. Main
+# 12. Main
 # ============================================
 
 def main():
@@ -691,22 +583,42 @@ def main():
 
     try:
 
-        initialize_gpio()
+        init_gpio()
+        load_positions()
 
         print("===================================")
-        print(" Raspberry Pi 5 XYZ + Alpha")
-        print(" S-Curve + ZVD Input Shaping")
+        print(" XYZ + Alpha Position Setup")
         print("===================================")
 
         print("Commands:")
-        print("HOME        - Home XYZ")
-        print("START       - Full automatic transfer")
-        print("G3          - Open Alpha")
-        print("G9          - Close Alpha")
-        print("SET CLOSED  - Confirm Alpha closed")
-        print("SET OPEN    - Confirm Alpha open")
-        print("POS         - Show position")
-        print("Q           - Exit")
+        print("HOME")
+        print("X L 1000")
+        print("X H 1000")
+        print("Y L 1000")
+        print("Z L 1000")
+        print("POS")
+        print("SAVE 1")
+        print("SAVE 2")
+        print("SHOW")
+        print("A L 100")
+        print("A H 100")
+        print("G3")
+        print("G9")
+        print("SET CLOSED")
+        print("SET OPEN")
+        print("Q")
+
+        print("\nHome sensor states:")
+
+        for axis in PINS:
+
+            state = (
+                "PRESSED"
+                if switch_pressed(axis)
+                else "RELEASED"
+            )
+
+            print(f"{axis}: {state}")
 
         while True:
 
@@ -714,45 +626,83 @@ def main():
                 "\nCommand > "
             ).strip().upper()
 
+            parts = command.split()
+
+            if not parts:
+                continue
+
             try:
 
-                if command == "Q":
+                if parts == ["Q"]:
                     break
 
-                elif command == "HOME":
+                elif parts == ["HOME"]:
                     home_all()
 
-                elif command == "START":
-                    start_transfer()
+                elif parts == ["POS"]:
+                    show_position(position_steps)
+                    print(f"Alpha: {alpha_state}")
 
-                elif command == "G3":
+                elif parts == ["SHOW"]:
+                    show_saved_positions()
+
+                elif (
+                    len(parts) == 2
+                    and parts[0] == "SAVE"
+                    and parts[1] in ("1", "2")
+                ):
+                    save_position(parts[1])
+
+                elif (
+                    len(parts) == 3
+                    and parts[0] in PINS
+                    and parts[1] in ("H", "L")
+                ):
+                    steps = int(parts[2])
+
+                    jog(
+                        parts[0],
+                        parts[1],
+                        steps
+                    )
+
+                elif (
+                    len(parts) == 3
+                    and parts[0] == "A"
+                    and parts[1] in ("H", "L")
+                ):
+                    steps = int(parts[2])
+
+                    move_alpha(
+                        parts[1],
+                        steps
+                    )
+
+                elif parts == ["G3"]:
                     alpha_open()
 
-                elif command == "G9":
+                elif parts == ["G9"]:
                     alpha_close()
 
-                elif command == "SET CLOSED":
+                elif parts == ["SET CLOSED"]:
                     alpha_state = "CLOSED"
                     print("Alpha confirmed CLOSED")
 
-                elif command == "SET OPEN":
+                elif parts == ["SET OPEN"]:
                     alpha_state = "OPEN"
                     print("Alpha confirmed OPEN")
-
-                elif command == "POS":
-                    show_position()
 
                 else:
                     print("Invalid command")
 
-            except Exception as e:
+            except ValueError:
+                print("ERROR: Invalid numeric input")
 
-                print(f"ERROR: {e}")
-                print("Verify hardware before continuing")
+            except Exception as exc:
+                print(f"ERROR: {exc}")
 
     except (KeyboardInterrupt, EOFError):
-
-        print("\nProgram interrupted")
+        print("\nInterrupted")
 
     finally:
 
